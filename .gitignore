@@ -1,0 +1,24 @@
+# Environment / secrets
+.env
+*.env
+irina.env
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Runtime / uploads
+uploads/
+books/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
