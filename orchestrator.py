@@ -349,7 +349,21 @@ class Orchestrator:
             memory = supabase_client.fetch_memory_context()[:2000]
         except Exception:
             pass
+        from datetime import date as _today_date
+        _today = str(_today_date.today())
+        # Load rules from Supabase at startup
+        rules_text = ""
+        try:
+            r = _run_query_memory("SELECT content FROM rules ORDER BY created_at LIMIT 50")
+            if r and "error" not in r.lower() and len(r) > 10:
+                rules_text = "\n\nACTIVE RULES (verify before AND after each interaction):\n" + r
+        except Exception:
+            pass
         self._system = f"""You are Axon — an AI assistant powered by DeepSeek (NOT Claude, NOT GPT). Your underlying model is DeepSeek. You are running for {name} (timezone: {tz}).
+Today's date is {_today}. Use this date when querying food_entries or any date-sensitive tables.{rules_text}
+INTERACTION PROTOCOL:
+- START of each interaction: if rules not in context, call query_memory("SELECT content FROM rules ORDER BY created_at LIMIT 50").
+- END of each interaction: silently verify your response against active rules before sending.
 
 You have access to Claude Code (a powerful AI that can read/write files, run bash, SSH, etc.)
 via a delegation mechanism. When you need Claude to DO something (not just reason about it),
