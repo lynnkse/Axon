@@ -47,6 +47,28 @@ KEEP_TURNS   = 20   # turns kept after compression
 
 CLAUDE_REQUEST_RE = re.compile(r"<CLAUDE_REQUEST>(.*?)</CLAUDE_REQUEST>", re.DOTALL)
 
+# ── DeepSeek tool definitions ─────────────────────────────────────────────────
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_memory",
+            "description": "Query or write to the Supabase database. Use for food logging, task queries, memory facts, recent messages, roadmap, etc. Accepts SQL SELECT (any table) or INSERT/UPDATE on approved tables.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL query. SELECT from any table. INSERT/UPDATE allowed on: food_entries, fitness_log, roadmap, personal_tasks, frequent_foods."}
+                },
+                "required": ["sql"]
+            }
+        }
+    }
+]
+
+_WRITABLE_TABLES = {"food_entries", "fitness_log", "roadmap", "personal_tasks", "frequent_foods"}
+
+
+
 # ── Broadcaster: publish to all connected response sockets ────────────────────
 class Broadcaster:
     def __init__(self):
@@ -71,6 +93,106 @@ class Broadcaster:
                 self._clients.remove(s)
                 log.info(f"Subscriber disconnected (total: {len(self._clients)})")
 
+
+
+def _run_query_memory(sql: str) -> str:
+    import re as _re, json as _json, urllib.request, urllib.parse
+    from datetime import date as _date
+    sql_stripped = sql.strip().upper()
+    sql_lower    = sql.strip().lower()
+
+    if sql_stripped.startswith(("INSERT", "UPDATE")):
+        table_m = _re.search(r"(?:into|update)\s+(\w+)", sql_lower)
+        table   = table_m.group(1) if table_m else ""
+        if table not in _WRITABLE_TABLES:
+            return f"[query_memory: writes not allowed on '{table}']"
+        if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+            return "[query_memory: DB not configured]"
+        try:
+            cols_m = _re.search(r"\((.*?)\)\s*values\s*\((.*?)\)", sql_lower, _re.DOTALL)
+            if not cols_m:
+                return "[query_memory: cannot parse INSERT]"
+            cols = [c.strip().strip("'\"") for c in cols_m.group(1).split(",")]
+            vals_m = _re.search(r"values\s*\((.*)\)", sql.strip(), _re.DOTALL | _re.IGNORECASE)
+            if not vals_m:
+                return "[query_memory: cannot parse INSERT values]"
+            raw = vals_m.group(1)
+            vals, cur, in_q, qc = [], "", False, None
+            for ch in raw:
+                if ch in ("'", '"') and not in_q:
+                    in_q, qc = True, ch
+                elif ch == qc and in_q:
+                    in_q, qc = False, None
+                    cur += ch; continue
+                if ch == "," and not in_q:
+                    vals.append(cur.strip()); cur = ""; continue
+                cur += ch
+            if cur.strip(): vals.append(cur.strip())
+            row = {}
+            for col, val in zip(cols, vals):
+                v = val.strip().strip("'\"")
+                if v.upper() in ("NULL", ""): continue
+                if v.replace(".", "").replace("-", "").lstrip("-").isdigit():
+                    row[col] = float(v) if "." in v else int(v)
+                elif v.upper() == "CURRENT_DATE" or v.lower() in ("today", "now()"):
+                    row[col] = str(_date.today())
+                else:
+                    row[col] = v
+            payload = _json.dumps(row).encode()
+            req_url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
+            req = urllib.request.Request(req_url, data=payload, method="POST", headers={
+                "apikey": config.SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            })
+            with urllib.request.urlopen(req, timeout=15) as r:
+                result = _json.loads(r.read().decode())
+                return f"Inserted into {table}: {result}"
+        except Exception as e:
+            return f"[query_memory INSERT error: {e}]"
+
+    if not sql_stripped.startswith("SELECT"):
+        return "[query_memory: only SELECT/INSERT/UPDATE allowed]"
+
+    if _re.search(r"from\s+messages", sql_lower):
+        lim = _re.search(r"limit\s+(\d+)", sql_lower)
+        n   = min(int(lim.group(1)) if lim else 50, 200)
+        try:
+            return supabase_client.fetch_recent_messages(n=n) or "(no messages)"
+        except Exception as e:
+            return f"[messages error: {e}]"
+
+    if _re.search(r"from\s+(memory|facts)", sql_lower):
+        try:
+            return supabase_client.fetch_memory_context() or "(no memory)"
+        except Exception as e:
+            return f"[memory error: {e}]"
+
+    m = _re.search(r"from\s+(\w+)", sql_lower)
+    if not m:
+        return "[query_memory: cannot parse table]"
+    table = m.group(1)
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return "[query_memory: DB not configured]"
+    try:
+        lim     = _re.search(r"limit\s+(\d+)", sql_lower)
+        limit   = int(lim.group(1)) if lim else 50
+        where_m = _re.search(r"where\s+(.+?)(?:\s+order|\s+limit|$)", sql_lower, _re.DOTALL)
+        qs      = f"?limit={limit}&order=created_at.desc"
+        req_url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}{qs}"
+        req = urllib.request.Request(req_url, headers={
+            "apikey": config.SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rows = _json.loads(r.read().decode())
+            if not rows:
+                return f"(no rows in {table})"
+            return _json.dumps(rows, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"[query_memory SELECT error: {e}]"
 
 # ── DeepSeek session with sliding-window context compression ──────────────────
 class DeepSeekSession:
@@ -121,15 +243,42 @@ class DeepSeekSession:
         self.messages.append({"role": "user", "content": user_text})
         if len(self.messages) > MAX_TURNS:
             self._compress()
-        try:
-            resp = self.client.chat.completions.create(
-                model=DS_MODEL,
-                messages=[{"role": "system", "content": self.system}] + self.messages,
-            )
-            reply = resp.choices[0].message.content or ""
-        except Exception as e:
-            reply = f"[DeepSeek error: {e}]"
-        self.messages.append({"role": "assistant", "content": reply})
+        reply = ""
+        for _round in range(10):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=DS_MODEL,
+                    messages=[{"role": "system", "content": self.system}] + self.messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                )
+            except Exception as e:
+                reply = f"[DeepSeek error: {e}]"
+                break
+            msg = resp.choices[0].message
+            # No tool calls — final response
+            if not msg.tool_calls:
+                reply = msg.content or ""
+                self.messages.append({"role": "assistant", "content": reply})
+                break
+            # Tool calls present — execute each and feed results back
+            tool_results = []
+            for tc in msg.tool_calls:
+                fn   = tc.function.name
+                args = json.loads(tc.function.arguments)
+                if fn == "query_memory":
+                    result = _run_query_memory(args.get("sql", ""))
+                else:
+                    result = f"[unknown tool: {fn}]"
+                log.info(f"[tool] {fn}({args}) → {str(result)[:120]}")
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": str(result),
+                })
+            # Append assistant turn with tool_calls, then tool results
+            self.messages.append(msg.model_dump(exclude_unset=True))
+            self.messages.extend(tool_results)
         self._save()
         return reply
 
