@@ -214,10 +214,14 @@ class ResponseSubscriber:
                                 self._loop.call_soon_threadsafe(
                                     self._tui_queue.put_nowait, msg
                                 )
+                            elif msg.get("source") == "user_echo":
+                                pass  # suppress echo in Telegram — shown in CLI only
                             elif msg.get("source") == "proactive":
                                 self._loop.call_soon_threadsafe(
                                     self._proactive_queue.put_nowait, msg
                                 )
+                            elif msg.get("type") == "activity":
+                                pass  # drop — handled separately in _wait_for_response
                             else:
                                 self._loop.call_soon_threadsafe(
                                     self._response_queue.put_nowait, msg
@@ -337,7 +341,7 @@ async def _status_notifier(
     update: Update,
     stop_event: asyncio.Event,
     activity_event: Optional[asyncio.Event] = None,
-    initial_delay: float = 15.0,
+    initial_delay: float = 60.0,
     interval: float = 60.0,
 ):
     """
@@ -364,6 +368,7 @@ async def _status_notifier(
     except Exception:
         pass
 
+    repeat_count = 0
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=interval)
@@ -372,6 +377,10 @@ async def _status_notifier(
             elapsed += int(interval)
         if stop_event.is_set():
             return
+        repeat_count += 1
+        if repeat_count > 1:
+            # Already sent one follow-up — go silent until _wait_for_response hits its own timeout
+            continue
         if activity_event and activity_event.is_set():
             status = f"⏳ Claude is working... ({elapsed}s)"
         else:
