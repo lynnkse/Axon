@@ -47,11 +47,18 @@ from telegram.ext import (
 
 import config
 
+_LOG_DIR = Path(__file__).parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [telegram_node] %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
+_file_handler = logging.FileHandler(_LOG_DIR / "telegram_node.log")
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [telegram_node] %(levelname)s %(message)s", datefmt="%H:%M:%S"
+))
+logging.getLogger().addHandler(_file_handler)
 log = logging.getLogger(__name__)
 
 # ── Memory tag stripping ──────────────────────────────────────────────────────
@@ -167,14 +174,12 @@ class ResponseSubscriber:
     Routes messages to two queues:
       _response_queue   — normal {text, source, user_id} messages
       _permission_queue — {type:"permission_request", tool_name, tool_input} messages
-      _confirm_queue    — {type:"confirm_request", action_id, summary} messages (executor)
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
         self._response_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._permission_queue: asyncio.Queue[dict] = asyncio.Queue()
-        self._confirm_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._tui_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._proactive_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._thread = threading.Thread(target=self._reader_thread, daemon=True)
@@ -202,11 +207,7 @@ class ResponseSubscriber:
                             continue
                         try:
                             msg = json.loads(line)
-                            if msg.get("type") == "confirm_request":
-                                self._loop.call_soon_threadsafe(
-                                    self._confirm_queue.put_nowait, msg
-                                )
-                            elif msg.get("type") == "permission_request":
+                            if msg.get("type") == "permission_request":
                                 self._loop.call_soon_threadsafe(
                                     self._permission_queue.put_nowait, msg
                                 )
@@ -225,22 +226,19 @@ class ResponseSubscriber:
                         except json.JSONDecodeError as e:
                             log.warning(f"Bad response JSON: {e}")
             except Exception as e:
-                log.warning(f"claude_response.sock error: {e} — retrying in 0.5s")
+                log.warning(f"claude_response.sock error: {e} — retrying in 3s")
             finally:
                 try:
                     sock.close()
                 except Exception:
                     pass
-            time.sleep(0.5)
+            time.sleep(3)
 
     async def get(self) -> dict:
         return await self._response_queue.get()
 
     async def get_permission(self) -> dict:
         return await self._permission_queue.get()
-
-    async def get_confirm(self) -> dict:
-        return await self._confirm_queue.get()
 
     async def get_tui_prompt(self) -> dict:
         return await self._tui_queue.get()
@@ -308,78 +306,39 @@ async def _typing_keepalive(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             pass
 
 
-_RESPONSE_TIMEOUT = 720.0  # 12 min (session_manager times out at 10 min)
-
-
-async def _wait_for_response(
-    subscriber: ResponseSubscriber,
-    source: str,
-    activity_event: Optional[asyncio.Event] = None,
-) -> str:
+async def _wait_for_response(subscriber: ResponseSubscriber, source: str) -> str:
     """Wait for next response from SessionManager with matching source."""
-    deadline = asyncio.get_event_loop().time() + _RESPONSE_TIMEOUT
     while True:
-        remaining = deadline - asyncio.get_event_loop().time()
-        if remaining <= 0:
-            return "⌛ No response in 12 minutes. Claude may be stuck. Send /restart to reset."
-        try:
-            msg = await asyncio.wait_for(subscriber.get(), timeout=min(remaining, 30.0))
-        except asyncio.TimeoutError:
-            continue
-        if msg.get("type") == "activity":
-            if activity_event and msg.get("growing"):
-                activity_event.set()
-            continue
-        return msg.get("text", "")
+        msg = await subscriber.get()
+        if msg.get("source") == source:
+            return msg.get("text", "")
 
 
-async def _status_notifier(
+async def _execute_and_reply_inner(
     update: Update,
-    stop_event: asyncio.Event,
-    activity_event: Optional[asyncio.Event] = None,
-    initial_delay: float = 15.0,
-    interval: float = 60.0,
-):
-    """
-    After initial_delay, send a status message based on actual JSONL activity.
-    - No activity seen: warn that Claude may not have received the message.
-    - Activity seen: confirm Claude is working.
-    Then repeat every interval seconds with current state.
-    """
+    context: ContextTypes.DEFAULT_TYPE,
+    subscriber: ResponseSubscriber,
+    text: str,
+    source: str = "telegram",
+    media_path: Optional[str] = None,
+) -> str:
+    """Send to SessionManager and wait for response. Must be called while holding _message_lock."""
+    user_id = str(update.effective_user.id)
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(
+        _typing_keepalive(update, context, stop_typing)
+    )
+    _send_to_session_manager(text, source, user_id, media_path)
     try:
-        await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=initial_delay)
-        return
-    except asyncio.TimeoutError:
-        pass
-    if stop_event.is_set():
-        return
-
-    elapsed = int(initial_delay)
-    if activity_event and activity_event.is_set():
-        msg = f"⏳ Claude is working... ({elapsed}s)"
-    else:
-        msg = "⚠️ Claude hasn't started responding — the message may not have been received."
-    try:
-        await update.effective_message.reply_text(msg)
-    except Exception:
-        pass
-
-    while not stop_event.is_set():
+        raw = await _wait_for_response(subscriber, source)
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=interval)
-            return
-        except asyncio.TimeoutError:
-            elapsed += int(interval)
-        if stop_event.is_set():
-            return
-        if activity_event and activity_event.is_set():
-            status = f"⏳ Claude is working... ({elapsed}s)"
-        else:
-            status = f"⚠️ Still no response from Claude ({elapsed}s) — consider /restart"
-        try:
-            await update.effective_message.reply_text(status)
-        except Exception:
+            await typing_task
+        except asyncio.CancelledError:
             pass
+    return raw
 
 
 async def _handle_and_reply(
@@ -391,37 +350,8 @@ async def _handle_and_reply(
     media_path: Optional[str] = None,
 ):
     """Common handler: send to SessionManager, keepalive, deliver response."""
-    user_id = str(update.effective_user.id)
-
-    # Send typing immediately — before waiting for the lock, so the user always
-    # sees the indicator even if a previous message is still being processed.
-    try:
-        await update.effective_message.reply_chat_action("typing")
-    except Exception:
-        pass
-
     async with _get_message_lock():
-        stop_typing = asyncio.Event()
-        activity_event = asyncio.Event()
-        typing_task = asyncio.create_task(
-            _typing_keepalive(update, context, stop_typing)
-        )
-        status_task = asyncio.create_task(
-            _status_notifier(update, stop_typing, activity_event)
-        )
-
-        _send_to_session_manager(text, source, user_id, media_path)
-
-        try:
-            raw = await _wait_for_response(subscriber, source, activity_event)
-        finally:
-            stop_typing.set()
-            for t in (typing_task, status_task):
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        raw = await _execute_and_reply_inner(update, context, subscriber, text, source, media_path)
 
     clean = _strip_memory_tags(raw)
     if not clean:
@@ -430,12 +360,7 @@ async def _handle_and_reply(
     for chunk in _split_message(clean):
         await update.effective_message.reply_text(chunk)
 
-    # Cleanup downloaded media
-    if media_path:
-        try:
-            os.unlink(media_path)
-        except Exception:
-            pass
+    # Keep downloaded media — not deleted so Claude can re-read in follow-up messages
 
 
 # ── Permission request handling ───────────────────────────────────────────────
@@ -536,32 +461,6 @@ async def _proactive_dispatcher(
                 log.error(f"Failed to send proactive message: {e}")
 
 
-async def _confirm_dispatcher(
-    subscriber: "ResponseSubscriber",
-    bot,
-    authorized_user_id: str,
-):
-    """Background task: sends executor action confirmation requests as Telegram inline buttons."""
-    while True:
-        msg = await subscriber.get_confirm()
-        action_id = msg.get("action_id", "")
-        summary = msg.get("summary", "unknown action")
-        log.info(f"Sending confirm request to Telegram: action_id={action_id}")
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Approve", callback_data=f"exec:approve:{action_id}"),
-            InlineKeyboardButton("❌ Deny",    callback_data=f"exec:deny:{action_id}"),
-        ]])
-        try:
-            await bot.send_message(
-                chat_id=authorized_user_id,
-                text=summary,
-                parse_mode="Markdown",
-                reply_markup=keyboard,
-            )
-        except Exception as e:
-            log.error(f"Failed to send confirm request: {e}")
-
-
 async def _permission_dispatcher(
     subscriber: ResponseSubscriber,
     bot,
@@ -614,9 +513,10 @@ async def _ingest_study_pdf(update: Update, file_path: str, caption: str):
 
     if not area:
         await update.message.reply_text(
-            f"📚 PDF saved at:\n`{file_path}`\n\n"
-            "Tell me: area, title, and author — I'll ingest it.\n"
-            "Or resend with caption: `Fitness | Book Title | Author`",
+            "Send the PDF with a caption specifying the study area:\n"
+            "`Linear Algebra | Book Title | Author`\n\n"
+            "Available areas: Linear Algebra, Calculus, Factor Graphs, "
+            "Markov Processes, Estimation Theory",
             parse_mode="Markdown",
         )
         return
@@ -696,23 +596,48 @@ def _make_handlers(subscriber: ResponseSubscriber):
             return
 
         await update.message.reply_chat_action("typing")
-        try:
-            tg_file = await voice.get_file()
-            import httpx
-            async with httpx.AsyncClient(timeout=30) as dl_client:
-                resp = await dl_client.get(tg_file.file_path)
-                audio_bytes = resp.content
-            log.info(f"Voice download: {len(audio_bytes)} bytes, status={resp.status_code}")
-            transcription = await _transcribe_voice(bytes(audio_bytes))
-            if not transcription:
-                await update.message.reply_text("Could not transcribe voice message.")
-                return
-            text = f"[Voice message transcribed]: {transcription}"
-            log.info(f"Transcribed: {transcription[:80]}")
-            await _handle_and_reply(update, context, subscriber, text)
-        except Exception as e:
-            log.error(f"Voice error: {e}")
-            await update.message.reply_text("Could not process voice message.")
+        # Hold the lock for the entire voice pipeline (download + transcribe + response)
+        # so that concurrent voice messages can't interleave and swap order.
+        async with _get_message_lock():
+            try:
+                tg_file = await voice.get_file()
+                import httpx
+                async with httpx.AsyncClient(timeout=90) as dl_client:
+                    resp = await dl_client.get(tg_file.file_path)
+                    audio_bytes = resp.content
+                log.info(f"Voice download: {len(audio_bytes)} bytes, status={resp.status_code}")
+                transcription = await _transcribe_voice(bytes(audio_bytes))
+                if not transcription:
+                    await update.message.reply_text("Could not transcribe voice message.")
+                    return
+                text = f"[Voice message transcribed]: {transcription}"
+                log.info(f"Transcribed: {transcription[:80]}")
+                raw = await _execute_and_reply_inner(update, context, subscriber, text)
+            except Exception as e:
+                log.error(f"Voice error: {e}", exc_info=True)
+                # Retry once after a short delay before giving up
+                try:
+                    await asyncio.sleep(2)
+                    tg_file = await voice.get_file()
+                    async with httpx.AsyncClient(timeout=90) as dl_client:
+                        resp = await dl_client.get(tg_file.file_path)
+                        audio_bytes = resp.content
+                    transcription = await _transcribe_voice(bytes(audio_bytes))
+                    if not transcription:
+                        await update.message.reply_text("Could not transcribe voice message.")
+                        return
+                    text = f"[Voice message transcribed]: {transcription}"
+                    raw = await _execute_and_reply_inner(update, context, subscriber, text)
+                except Exception as e2:
+                    log.error(f"Voice retry failed: {e2}", exc_info=True)
+                    await update.message.reply_text("Could not process voice message.")
+                    return
+
+        clean = _strip_memory_tags(raw)
+        if not clean:
+            clean = "(no response)"
+        for chunk in _split_message(clean):
+            await update.effective_message.reply_text(chunk)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_authorized(update):
@@ -747,28 +672,10 @@ def _make_handlers(subscriber: ResponseSubscriber):
             file_path = str(UPLOADS_DIR / f"{ts}_{file_name}")
             await tg_file.download_to_drive(file_path)
 
-            # Detect PDF by magic bytes (handles files without .pdf extension)
-            is_pdf = False
-            try:
-                with open(file_path, "rb") as _f:
-                    is_pdf = _f.read(4) == b"%PDF"
-            except Exception:
-                pass
-
-            # PDF: copy to persistent books dir and route to study ingestion
-            if is_pdf or (doc.file_name or "").lower().endswith(".pdf"):
-                books_dir = Path(config.RELAY_DIR) / "books"
-                books_dir.mkdir(exist_ok=True)
-                # Use original filename with .pdf extension
-                safe_name = re.sub(r"[^\w\-.]", "_", file_name)
-                if not safe_name.lower().endswith(".pdf"):
-                    safe_name += ".pdf"
-                persistent_path = str(books_dir / f"{ts}_{safe_name}")
-                import shutil
-                shutil.copy2(file_path, persistent_path)
-                log.info(f"PDF saved to persistent path: {persistent_path}")
+            # PDF study book ingestion
+            if (doc.file_name or "").lower().endswith(".pdf"):
                 caption = update.message.caption or ""
-                await _ingest_study_pdf(update, persistent_path, caption)
+                await _ingest_study_pdf(update, file_path, caption)
                 return
 
             caption = update.message.caption or f"Analyze: {doc.file_name}"
@@ -1032,33 +939,6 @@ def main():
 
         application.add_handler(CallbackQueryHandler(on_permission_callback, pattern="^perm:"))
 
-        # Executor confirm inline keyboard handler (deepseek_brain actions)
-        async def on_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            query = update.callback_query
-            auth_ok = not AUTHORIZED_USER_ID or str(query.from_user.id) == AUTHORIZED_USER_ID
-            if auth_ok:
-                parts = query.data.split(":", 2)  # exec:approve:<id>
-                decision = parts[1] if len(parts) > 1 else "deny"
-                action_id = parts[2] if len(parts) > 2 else ""
-                approved = decision == "approve"
-                log.info(f"Executor confirm {decision} for action_id={action_id}")
-                try:
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    sock.connect(config.USER_INPUT_SOCK)
-                    payload = json.dumps({"type": "confirm_response", "action_id": action_id, "approved": approved}) + "\n"
-                    sock.sendall(payload.encode())
-                    sock.close()
-                except Exception as e:
-                    log.error(f"Failed to send confirm_response: {e}")
-            try:
-                await query.answer()
-                label = "✅ Approved" if (auth_ok and approved) else "❌ Denied"
-                await query.edit_message_text(label)
-            except Exception:
-                pass
-
-        application.add_handler(CallbackQueryHandler(on_confirm_callback, pattern="^exec:"))
-
         # TUI choice prompt inline keyboard handler
         async def on_tui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query = update.callback_query
@@ -1092,9 +972,6 @@ def main():
             )
             loop.create_task(
                 _proactive_dispatcher(subscriber, application.bot, AUTHORIZED_USER_ID)
-            )
-            loop.create_task(
-                _confirm_dispatcher(subscriber, application.bot, AUTHORIZED_USER_ID)
             )
 
         log.info(f"TelegramNode starting (authorized user: {AUTHORIZED_USER_ID or 'ANY'})")
