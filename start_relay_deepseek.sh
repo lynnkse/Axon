@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 set -a
-source "$PROJECT_ROOT/.env" 2>/dev/null || true
+source "$SCRIPT_DIR/.env" 2>/dev/null || source "$PROJECT_ROOT/.env" 2>/dev/null || true
 set +a
 
 if [[ "${1:-}" == "--tmux" ]]; then
@@ -22,7 +22,7 @@ fi
 cd "$SCRIPT_DIR"
 
 # Use pyenv python if available (needed on machines with system python < 3.9)
-PYTHON="${PYTHON:-$HOME/.pyenv/versions/cognitive-hq/bin/python}"
+PYTHON="${PYTHON:-$HOME/.virtualenvs/lynnkse/bin/python3.12}"
 
 # PID lock — prevent multiple relay instances
 RELAY_LOCK="/tmp/cognitive-hq-relay.lock"
@@ -64,6 +64,11 @@ $PYTHON proactive_node.py &
 PRO_PID=$!
 echo "[relay] ProactiveNode PID: $PRO_PID"
 
+# cli_node needs session_manager sockets (in claude-exec subdir)
+SOCKET_DIR=/tmp/cognitive-hq/claude-exec $PYTHON cli_node.py &
+CLI_PID=$!
+echo "[relay] CLINode PID: $CLI_PID"
+
 echo "[relay] All running. Ctrl+C to stop."
-trap "kill $SM_PID $TG_PID $PRO_PID 2>/dev/null; exit 0" INT TERM
+trap "kill $SM_PID $TG_PID $PRO_PID $CLI_PID 2>/dev/null; exit 0" INT TERM
 wait

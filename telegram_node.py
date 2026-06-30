@@ -131,7 +131,7 @@ async def _transcribe_groq(audio_bytes: bytes) -> str:
             mp3_bytes = mp3_f.read()
         os.unlink(src_path); os.unlink(mp3_path)
         from groq import AsyncGroq
-        client = AsyncGroq(api_key=groq_key)
+        client = AsyncGroq(api_key=groq_key, timeout=120.0)
         result = await client.audio.transcriptions.create(
             file=("voice.mp3", mp3_bytes, "audio/mpeg"),
             model="whisper-large-v3-turbo",

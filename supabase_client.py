@@ -418,7 +418,7 @@ def fetch_messages_since(since_ts: Optional[str], channel: str = "telegram", lim
     """
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return []
-    filter_ts = f"&created_at=gt.{since_ts}" if since_ts else ""
+    filter_ts = f"&created_at=gt.{urllib.parse.quote(since_ts, safe=chr(0)[:0])}" if since_ts else ""
     url = (
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/messages"
         f"?select=role,content&channel=eq.{channel}{filter_ts}"

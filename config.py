@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # Locate .env relative to this file: relay_v2/../.env
-_ENV_PATH = Path(__file__).parent.parent / ".env"
+_ENV_PATH = Path(__file__).parent / ".env"
 
 # Locate profile.md: relay_v2/../config/profile.md (overridable via PROFILE_PATH env)
 _default_profile = str(Path(__file__).parent.parent / "config" / "profile.md")
