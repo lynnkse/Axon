@@ -22,3 +22,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Local virtualenv
+axon_env/
