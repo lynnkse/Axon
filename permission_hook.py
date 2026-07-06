@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Must match config.py
-PERMISSION_SOCK = "/tmp/cognitive-hq/permission.sock"
+PERMISSION_SOCK = "/tmp/axon/permission.sock"
 ATTEMPT_TIMEOUT = 120  # seconds to wait per attempt
 MAX_RETRIES = 3       # deny after this many unanswered attempts
 LOG_FILE = "/tmp/permission_hook.log"

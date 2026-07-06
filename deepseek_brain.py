@@ -152,7 +152,7 @@ def _build_system_prompt(summaries: list | None = None) -> str:
         "they won't happen without approval.\n\n"
         f"Working context:\n"
         f"- User: {config.USER_NAME or 'Lynn'}\n"
-        f"- This relay runs on ROG (lynnkse@100.73.56.102). Code is at ~/cognitive-hq/. NOT on Leonid.\n"
+        f"- This relay runs on ROG (lynnkse@100.73.56.102). Code is at ~/Axon/. NOT on Leonid.\n"
         f"- Leonid (anpl@100.98.191.76) is a separate machine running Ailin/creature bot.\n"
         f"- Allowed directories: {', '.join(ALLOWED_ROOTS)}\n"
         f"- Timezone: {config.USER_TIMEZONE}\n\n"
@@ -252,9 +252,9 @@ class ClaudeExecutorSession:
     does not interfere with the main relay sockets.  Communicates via the same
     JSON newline-delimited protocol telegram_node uses — no PTY code duplicated.
 
-    Socket dir: /tmp/cognitive-hq/claude-exec
+    Socket dir: /tmp/axon/claude-exec
     """
-    SOCKET_DIR   = "/tmp/cognitive-hq/claude-exec"
+    SOCKET_DIR   = "/tmp/axon/claude-exec"
     INPUT_SOCK   = f"{SOCKET_DIR}/user_input.sock"
     RESPONSE_SOCK = f"{SOCKET_DIR}/claude_response.sock"
     RESPONSE_TIMEOUT = 180   # seconds to wait for Claude to reply
@@ -520,7 +520,7 @@ class DeepSeekBrain:
         except Exception as e:
             return f"[query_memory error: {e}]"
 
-    RELAY_SOURCE_DIR = "/home/lynnkse/cognitive-hq/claude-telegram-relay"
+    RELAY_SOURCE_DIR = "/home/lynnkse/Axon"
 
     def _run_tool(self, name: str, args: dict, send_confirm, publish_text=None) -> str:
         if name == "load_skill":
@@ -784,7 +784,7 @@ class BrainServer:
         self._serve_user_input()  # blocks
 
 
-LOCK_FILE = "/tmp/cognitive-hq/deepseek_brain.lock"
+LOCK_FILE = "/tmp/axon/deepseek_brain.lock"
 
 def _acquire_exclusive_lock():
     import fcntl

@@ -10,8 +10,8 @@ set -a
 source "$PROJECT_ROOT/.env" 2>/dev/null || true
 set +a
 
-PYTHON="${PYTHON:-$HOME/.pyenv/versions/cognitive-hq/bin/python}"
-RELAY_LOCK="/tmp/cognitive-hq-relay.lock"
+PYTHON="${PYTHON:-$HOME/Axon/axon_env/bin/python}"
+RELAY_LOCK="/tmp/axon-relay.lock"
 
 # ── Check .env ────────────────────────────────────────────────────────────────
 if [ -z "$DEEPSEEK_API_KEY" ]; then
@@ -25,7 +25,7 @@ pkill -f orchestrator.py  2>/dev/null
 pkill -f telegram_node.py 2>/dev/null
 pkill -f session_manager.py 2>/dev/null
 pkill -f proactive_node.py 2>/dev/null
-rm -f /tmp/cognitive-hq/*.sock /tmp/cognitive-hq/deepseek_brain.lock "$RELAY_LOCK" 2>/dev/null
+rm -f /tmp/axon/*.sock /tmp/axon/deepseek_brain.lock "$RELAY_LOCK" 2>/dev/null
 sleep 1
 
 if [[ "${1:-}" == "--tmux" ]]; then
@@ -64,7 +64,7 @@ ORCH_PID=$!
 
 echo "[axon] Waiting for sockets..."
 for i in $(seq 1 30); do
-    [ -S "/tmp/cognitive-hq/user_input.sock" ] && echo "[axon] Sockets ready (${i}s)" && break
+    [ -S "/tmp/axon/user_input.sock" ] && echo "[axon] Sockets ready (${i}s)" && break
     sleep 1
 done
 

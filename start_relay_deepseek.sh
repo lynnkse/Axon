@@ -25,7 +25,7 @@ cd "$SCRIPT_DIR"
 PYTHON="${PYTHON:-$HOME/.virtualenvs/lynnkse/bin/python3.12}"
 
 # PID lock — prevent multiple relay instances
-RELAY_LOCK="/tmp/cognitive-hq-relay.lock"
+RELAY_LOCK="/tmp/axon-relay.lock"
 if [ -f "$RELAY_LOCK" ]; then
     OLD_PID=$(cat "$RELAY_LOCK")
     if kill -0 "$OLD_PID" 2>/dev/null; then
@@ -52,7 +52,7 @@ echo "[relay] DeepSeekBrain PID: $SM_PID"
 
 echo "[relay] Waiting for socket..."
 for i in $(seq 1 30); do
-    [ -S "/tmp/cognitive-hq/user_input.sock" ] && echo "[relay] Socket ready after ${i}s" && break
+    [ -S "/tmp/axon/user_input.sock" ] && echo "[relay] Socket ready after ${i}s" && break
     sleep 1
 done
 
@@ -65,7 +65,7 @@ PRO_PID=$!
 echo "[relay] ProactiveNode PID: $PRO_PID"
 
 # cli_node needs session_manager sockets (in claude-exec subdir)
-SOCKET_DIR=/tmp/cognitive-hq/claude-exec $PYTHON cli_node.py &
+SOCKET_DIR=/tmp/axon/claude-exec $PYTHON cli_node.py &
 CLI_PID=$!
 echo "[relay] CLINode PID: $CLI_PID"
 

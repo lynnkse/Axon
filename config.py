@@ -49,7 +49,7 @@ SUPABASE_URL: str = get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY: str = get("SUPABASE_ANON_KEY", "")
 
 # Socket paths (SOCKET_DIR overridable for multiple session instances)
-SOCKET_DIR: str = get("SOCKET_DIR", "/tmp/cognitive-hq")
+SOCKET_DIR: str = get("SOCKET_DIR", "/tmp/axon")
 USER_INPUT_SOCK: str = f"{SOCKET_DIR}/user_input.sock"
 CLAUDE_RESPONSE_SOCK: str = f"{SOCKET_DIR}/claude_response.sock"
 DISPLAY_SOCK: str = f"{SOCKET_DIR}/display.sock"
