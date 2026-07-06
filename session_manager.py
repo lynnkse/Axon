@@ -314,6 +314,11 @@ class SessionManagerNode:
         clean = self._ANSI_RE.sub(b'', raw)
         text = clean.decode('utf-8', errors='replace')
 
+        # Real Claude TUI prompts always show a ❯ cursor. Bail early if absent
+        # to avoid false positives from numbered lists in injected protocol text.
+        if '❯' not in text:
+            return
+
         # Look for 2+ consecutive numbered choices
         lines = text.splitlines()
         choices = []
@@ -615,9 +620,11 @@ class SessionManagerNode:
                 session_file = None
                 initial_size = 0
 
-            # Prepend any semantically relevant rules to the message.
+            # Prepend permanent rules (always) + keyword-matched rules.
+            permanent_rules = supabase_client.fetch_permanent_rules()
             relevant_rules = supabase_client.fetch_relevant_rules(item.text)
-            message_text = (relevant_rules + item.text) if relevant_rules else item.text
+            prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
+            message_text = (prefix + item.text) if prefix else item.text
 
             # Inject semantically relevant dreams for real user messages.
             if item.source == "telegram":

@@ -52,7 +52,7 @@ ALLOWED_ROOTS: list[str] = [
 ]
 WATCHDOG_ENABLED: bool = config.get("WATCHDOG", "0") == "1"
 
-MAX_TOOL_ROUNDS = 25       # max consecutive tool calls before forcing text response
+MAX_TOOL_ROUNDS = 10       # max consecutive tool calls before forcing text response
 MAX_HISTORY = 40           # messages to keep in context (older ones dropped)
 
 # ── Tool definitions (OpenAI function calling format) ─────────────────────────
@@ -114,6 +114,20 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "Load full instructions for a named skill. The system prompt lists available skills with one-line descriptions. Call this when the user's message triggers a skill — before following its protocol.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name as listed in the system prompt skills index (e.g. 'fitness_protocol', 'russia_tracker')"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
 ]
 
 SUMMARY_EVERY_N = 20   # summarize after every N messages saved
@@ -152,32 +166,16 @@ def _build_system_prompt(summaries: list | None = None) -> str:
         "use delegate_to_claude with a clear plain-language request\n"
         "3. Claude will execute the action and report back - "
         "you continue the conversation with the result\n\n"
-        "IMPORTANT — delegate_to_claude is SYNCHRONOUS. It blocks until Claude finishes and returns the result.\n"
-        "NEVER say 'Claude is working on it' or 'waiting for results' or 'I'll update you when done'.\n"
-        "When delegate_to_claude returns, you already have the result. Report it immediately.\n"
-        "If the delegate was blocked (called more than once per turn), say so and summarize what you know.\n\n"
-        "Be concise. No need to narrate every tool call - just do the work and summarize results.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "RULES TABLE — verify before every tool call and before finishing any task:\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "[ ] No changes to files outside allowed roots without explicit permission from user\n"
-        "[ ] No more than 3 files modified in a single delegate_to_claude call — split if more\n"
-        "[ ] No destructive operations (delete, overwrite, git reset/force-push) without stating them first\n"
-        "[ ] No committing or pushing to git without explicit instruction\n"
-        "[ ] No changes to any machine other than ROG without explicit instruction per action\n"
-        "[ ] Do not loop delegate_to_claude for the same task — if Claude returns a result, use it\n"
-        "[ ] If a task requires >3 delegate calls, pause and ask the user how to proceed\n"
-        "[ ] Never store API keys, tokens, or passwords in memory files or logs\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "FOOD RULE (applies unless user gives other instructions):\n"
-        "When the user posts any food item or meal — automatically:\n"
-        "  1. Call query_memory with INSERT INTO food_entries (date, food_item, portion, calories, protein_g, fat_g, carbs_g) VALUES ('today', ...)\n"
-        "  2. Call query_memory with SELECT to get today's totals\n"
-        "  3. Reply with item breakdown + today's running total (calories + macros g + macro % of cals)\n"
-        "  NEVER use delegate_to_claude for food — query_memory handles INSERT and SELECT directly.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        "Be concise. No need to narrate every tool call - just do the work and summarize results."
     )
     parts = [base]
+    try:
+        skills_index = supabase_client.fetch_skills_index()
+        if skills_index:
+            parts.append(skills_index)
+            log.info(f"[prompt] skills index loaded: {len(skills_index)} chars")
+    except Exception as e:
+        log.warning(f"Failed to load skills index: {e}")
     try:
         mem = supabase_client.fetch_memory_context()
         if mem:
@@ -359,7 +357,8 @@ class ClaudeExecutorSession:
                             publish_text(f"🔑 Claude permission request:\n{summary}")
                             continue
                         if msg.get("growing"):
-                            continue  # don't forward Claude's streaming tokens to Telegram
+                            publish_text(f"🔧 {msg.get('text', '')}")
+                            continue
                         text = msg.get("text", "")
                         return text or "done"
             except socket.timeout:
@@ -445,7 +444,7 @@ class DeepSeekBrain:
         if any(kw in _req_lower for kw in _self_service_keywords):
             return (
                 "[redirect] This request is about memory or Supabase data - "
-                "use the query_memory tool with SQL (SELECT or INSERT) instead of delegating to Claude. "
+                "use the query_memory tool with an appropriate SQL SELECT instead of delegating to Claude. "
                 "Example: SELECT content, role, created_at FROM messages ORDER BY created_at DESC LIMIT 50"
             )
         log.info(f"[delegate→Claude] {request[:120]}")
@@ -461,86 +460,12 @@ class DeepSeekBrain:
             log.error(f"Claude delegate error: {e}")
             return f"[delegate error: {e}]"
 
-    # Tables where INSERT/UPDATE are allowed via query_memory
-    _WRITABLE_TABLES = {"food_entries", "fitness_log", "roadmap", "personal_tasks", "frequent_foods"}
-
     def _run_query_memory(self, sql: str) -> str:
         """Execute SQL against the memory database via supabase_client helpers."""
         import re as _re
-        import json as _json
-        import urllib.request, urllib.parse
         sql_stripped = sql.strip().upper()
-        sql_lower = sql.strip().lower()
-
-        # Allow INSERT/UPDATE on safe writable tables via PostgREST
-        if sql_stripped.startswith("INSERT") or sql_stripped.startswith("UPDATE"):
-            table_m = _re.search(r"(?:into|update)\s+(\w+)", sql_lower)
-            table = table_m.group(1) if table_m else ""
-            if table not in self._WRITABLE_TABLES:
-                return f"[query_memory: INSERT/UPDATE not allowed on table '{table}']"
-            if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
-                return "[query_memory: database not configured]"
-            try:
-                # Parse VALUES from INSERT INTO table (cols) VALUES (vals)
-                cols_m = _re.search(r"\((.*?)\)\s*values\s*\((.*?)\)", sql_lower, _re.DOTALL)
-                if not cols_m:
-                    return "[query_memory: could not parse INSERT columns/values]"
-                cols = [c.strip().strip("'\"") for c in cols_m.group(1).split(",")]
-                # Re-parse values from original SQL (preserve case/types)
-                vals_m = _re.search(r"values\s*\((.*)\)", sql.strip(), _re.DOTALL | _re.IGNORECASE)
-                if not vals_m:
-                    return "[query_memory: could not parse INSERT values]"
-                raw_vals = vals_m.group(1)
-                # Tokenize values (handle quoted strings with commas)
-                vals = []
-                current = ""
-                in_quote = False
-                qchar = None
-                for ch in raw_vals:
-                    if ch in ("'", '"') and not in_quote:
-                        in_quote = True
-                        qchar = ch
-                    elif ch == qchar and in_quote:
-                        in_quote = False
-                        qchar = None
-                        current += ch
-                        continue
-                    if ch == "," and not in_quote:
-                        vals.append(current.strip())
-                        current = ""
-                        continue
-                    current += ch
-                if current.strip():
-                    vals.append(current.strip())
-                row = {}
-                for col, val in zip(cols, vals):
-                    v = val.strip().strip("'\"")
-                    if v.upper() in ("NULL", ""):
-                        continue
-                    if v.replace(".", "").replace("-", "").isdigit():
-                        row[col] = float(v) if "." in v else int(v)
-                    elif v.upper() == "CURRENT_DATE" or v.lower() in ("today", "now()"):
-                        from datetime import date
-                        row[col] = str(date.today())
-                    else:
-                        row[col] = v
-                payload = _json.dumps(row).encode()
-                req_url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
-                req = urllib.request.Request(req_url, data=payload, method="POST", headers={
-                    "apikey": config.SUPABASE_ANON_KEY,
-                    "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=representation",
-                })
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    result = _json.loads(resp.read().decode())
-                    log.info(f"[query_memory] INSERT into {table}: {result}")
-                    return f"Inserted into {table}: {result}"
-            except Exception as e:
-                return f"[query_memory INSERT error: {e}]"
-
         if not sql_stripped.startswith("SELECT"):
-            return "[query_memory: only SELECT, INSERT, or UPDATE queries allowed]"
+            return "[query_memory: only SELECT queries allowed]"
 
         # Route well-known queries to supabase_client helpers for reliability
         sql_lower = sql.strip().lower()
@@ -598,6 +523,10 @@ class DeepSeekBrain:
     RELAY_SOURCE_DIR = "/home/lynnkse/cognitive-hq/claude-telegram-relay"
 
     def _run_tool(self, name: str, args: dict, send_confirm, publish_text=None) -> str:
+        if name == "load_skill":
+            skill_name = args.get("name", "")
+            log.info(f"[tool] load_skill: {skill_name}")
+            return supabase_client.fetch_skill_by_name(skill_name)
         if name == "query_memory":
             return self._run_query_memory(args["sql"])
         if name == "delegate_to_claude":
@@ -649,24 +578,12 @@ class DeepSeekBrain:
             log.info(f"[chat] sending {len(messages)} messages to DeepSeek (sys={len(sys_prompt)} chars, history={len(self.history)})")
             final_text = ""
 
-            # Short conversational messages skip tool calls
-            _conversational = (
-                len(user_text) < 60
-                and not any(kw in user_text.lower() for kw in (
-                    "remind", "remember", "search", "find", "check", "run",
-                    "create", "delete", "send", "file", "note", "task",
-                    "open", "read", "write", "list", "schedule",
-                ))
-            )
-            _tc = "none" if _conversational else "auto"
-
-            _delegate_calls = 0  # cap delegate_to_claude at 1 per turn
             for round_num in range(MAX_TOOL_ROUNDS):
                 response = self.client.chat.completions.create(
                     model=DEEPSEEK_MODEL,
                     messages=messages,
                     tools=TOOLS,
-                    tool_choice=_tc,
+                    tool_choice="auto",
                     timeout=90,
                 )
                 msg = response.choices[0].message
@@ -687,15 +604,7 @@ class DeepSeekBrain:
                     fn_name = tc.function.name
                     fn_args = json.loads(tc.function.arguments)
                     log.info(f"Tool call: {fn_name}({list(fn_args.keys())})")
-                    if fn_name == "delegate_to_claude":
-                        _delegate_calls += 1
-                        if _delegate_calls > 3:
-                            log.warning(f"delegate_to_claude called {_delegate_calls}x in one turn — blocking")
-                            output = "[blocked] delegate_to_claude called too many times this turn. Synthesize an answer from what you have."
-                        else:
-                            output = self._run_tool(fn_name, fn_args, send_confirm, publish_text)
-                    else:
-                        output = self._run_tool(fn_name, fn_args, send_confirm, publish_text)
+                    output = self._run_tool(fn_name, fn_args, send_confirm, publish_text)
                     tool_results.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -707,12 +616,6 @@ class DeepSeekBrain:
             else:
                 final_text = "[max tool rounds reached — stopping]"
 
-            # Strip any <delegate_to_claude> XML that bled into the response text
-            import re as _re
-            final_text = _re.sub(r'<delegate_to_claude>.*?</delegate_to_claude>', '', final_text, flags=_re.DOTALL).strip()
-            # Strip any <delegate_to_claude> XML that bled into the response text
-            import re as _re
-            final_text = _re.sub(r'<delegate_to_claude>.*?</delegate_to_claude>', '', final_text, flags=_re.DOTALL).strip()
             log.info(f"[chat] final response ({len(final_text)} chars): {final_text[:120]!r}")
             # Only save clean responses to history — skip error/timeout artifacts
             if final_text and not final_text.startswith(("[max tool", "[error", "[blocked", "[delegate error")):
@@ -782,16 +685,6 @@ class BrainServer:
             if conn in self._response_subscribers:
                 self._response_subscribers.remove(conn)
 
-    def _publish_activity(self, user_id: str):
-        payload = json.dumps({"type": "activity", "growing": True, "user_id": user_id}) + "\n"
-        data = payload.encode()
-        with self._subs_lock:
-            for s in list(self._response_subscribers):
-                try:
-                    s.sendall(data)
-                except Exception:
-                    pass
-
     def _handle_user_input(self, data: bytes):
         try:
             msg = json.loads(data.decode())
@@ -831,8 +724,6 @@ class BrainServer:
 
         def run():
             try:
-                # Signal activity immediately so the telegram watchdog backs off
-                self._publish_activity(user_id)
                 response = self.brain.chat(text, send_confirm, publish_intermediate)
                 supabase_client.save_message("assistant", response, channel="deepseek")
                 self._publish(response, user_id)

@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""cli_node.py — Text terminal interface to Axon orchestrator."""
+"""
+cli_node.py — Text terminal interface to Axon orchestrator.
+
+Connects to user_input.sock (send) and claude_response.sock (receive).
+Simple stdin/stdout — no PTY, no raw mode.
+
+Displays messages with colored source labels:
+  [DS]      DeepSeek response
+  [CC→]     Claude delegation request
+  [CC✓]     Claude result
+  [You]     Echo of your input
+"""
 import json
 import os
 import socket
@@ -11,49 +22,20 @@ sys.path.insert(0, os.path.dirname(__file__))
 import config
 
 COLORS = {
-    "deepseek":       "\033[96m",    # bright cyan
-    "thinking":       "\033[90m",    # dark grey
+    "deepseek":       "\033[36m",    # cyan
     "claude_request": "\033[33m",    # yellow
     "claude_result":  "\033[32m",    # green
     "user_echo":      "\033[90m",    # grey
     "status":         "\033[35m",    # magenta
-    "tool_call":      "\033[33m",    # yellow
-    "tool_result":    "\033[32m",    # green
 }
-RESET  = "\033[0m"
-BOLD   = "\033[1m"
-DIM    = "\033[2m"
+RESET = "\033[0m"
 LABELS = {
     "deepseek":       "[DS] ",
-    "thinking":       "[🧠 thinking] ",
     "claude_request": "[CC→] ",
     "claude_result":  "[CC✓] ",
     "user_echo":      "",
     "status":         "[•] ",
-    "tool_call":      "[🔧] ",
-    "tool_result":    "[🔧✓] ",
 }
-
-_prompt_lock = threading.Lock()
-
-
-def _print_msg(text: str, source: str):
-    color = COLORS.get(source, "")
-    label = LABELS.get(source, f"[{source}] ")
-    is_final = source == "deepseek"
-
-    with _prompt_lock:
-        # Clear current line (in case > prompt is showing)
-        sys.stdout.write("\r\033[K")
-        if is_final:
-            # Divider before final answer
-            sys.stdout.write(f"\n{DIM}{'─'*60}{RESET}\n")
-        sys.stdout.write(f"\n{color}{BOLD}{label}{RESET}{color}{text}{RESET}\n")
-        if is_final:
-            # Divider + re-show prompt after final answer
-            sys.stdout.write(f"{DIM}{'─'*60}{RESET}\n")
-            sys.stdout.write("> ")
-        sys.stdout.flush()
 
 
 def _recv_loop():
@@ -75,8 +57,10 @@ def _recv_loop():
                         msg    = json.loads(line)
                         text   = msg.get("text", "")
                         source = msg.get("source", "axon")
+                        color  = COLORS.get(source, "")
+                        label  = LABELS.get(source, f"[{source}] ")
                         if text:
-                            _print_msg(text, source)
+                            print(f"\n{color}{label}{text}{RESET}", flush=True)
                     except Exception:
                         pass
         except Exception:

@@ -418,7 +418,7 @@ def fetch_messages_since(since_ts: Optional[str], channel: str = "telegram", lim
     """
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return []
-    filter_ts = f"&created_at=gt.{urllib.parse.quote(since_ts, safe=chr(0)[:0])}" if since_ts else ""
+    filter_ts = f"&created_at=gt.{since_ts}" if since_ts else ""
     url = (
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/messages"
         f"?select=role,content&channel=eq.{channel}{filter_ts}"
@@ -517,6 +517,80 @@ def _search_edge(query: str, table: str, match_count: int = 5, match_threshold: 
     except Exception as e:
         log.warning(f"Search edge function failed ({table}): {e}")
         return None
+
+
+def fetch_permanent_rules() -> str:
+    """Fetch all active rules marked permanent=true. Always loaded into system prompt."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return ""
+    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&permanent=eq.true&select=content"
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode())
+            if not rows:
+                return ""
+            return "[Permanent protocols — always follow these]\n" + "\n\n".join(r["content"] for r in rows)
+    except Exception as e:
+        log.warning(f"Failed to fetch permanent rules: {e}")
+        return ""
+
+
+def fetch_skills_index() -> str:
+    """
+    Fetch name + short_description for all active permanent skills.
+    Returns a compact index for the system prompt — full content is loaded on demand via fetch_skill_by_name().
+    """
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return ""
+    url = (
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules"
+        f"?active=eq.true&permanent=eq.true&name=not.is.null&select=name,short_description"
+    )
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode())
+            if not rows:
+                return ""
+            lines = [f"- {r['name']}: {r.get('short_description', '(no description)')}" for r in rows]
+            return (
+                "[Available skills — call load_skill(name) to load full instructions when triggered]\n"
+                + "\n".join(lines)
+            )
+    except Exception as e:
+        log.warning(f"Failed to fetch skills index: {e}")
+        return ""
+
+
+def fetch_skill_by_name(name: str) -> str:
+    """Fetch full content of a skill by name. Returns the full protocol/algorithm text."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return f"[skill '{name}' unavailable — database not configured]"
+    import urllib.parse as _up
+    url = (
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules"
+        f"?active=eq.true&name=eq.{_up.quote(name)}&select=name,content&limit=1"
+    )
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode())
+            if not rows:
+                return f"[skill '{name}' not found]"
+            return f"[Skill loaded: {rows[0]['name']}]\n\n{rows[0]['content']}"
+    except Exception as e:
+        log.warning(f"Failed to fetch skill '{name}': {e}")
+        return f"[skill '{name}' fetch error: {e}]"
 
 
 def _fetch_all_rules() -> list[dict]:
