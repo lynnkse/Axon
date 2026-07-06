@@ -523,7 +523,7 @@ def fetch_permanent_rules() -> str:
     """Fetch all active rules marked permanent=true. Always loaded into system prompt."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return ""
-    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&permanent=eq.true&select=content"
+    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&permanent=eq.true&name=is.null&select=content"
     req = urllib.request.Request(url, headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
@@ -561,7 +561,7 @@ def fetch_skills_index() -> str:
                 return ""
             lines = [f"- {r['name']}: {r.get('short_description', '(no description)')}" for r in rows]
             return (
-                "[Available skills — call load_skill(name) to load full instructions when triggered]\n"
+                "[Available skills — when triggered, query the Supabase rules table WHERE name = '<skill_name>' to load full protocol before acting]\n"
                 + "\n".join(lines)
             )
     except Exception as e:

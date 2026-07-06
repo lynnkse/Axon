@@ -134,6 +134,9 @@ class SessionManagerNode:
         if profile:
             parts.append(f"\nProfile:\n{profile}")
         if not config.SKIP_MEMORY_FETCH:
+            skills_index = supabase_client.fetch_skills_index()
+            if skills_index:
+                parts.append(f"\n{skills_index}")
             memory_context = supabase_client.fetch_memory_context()
             if memory_context:
                 parts.append(f"\n{memory_context}")
