@@ -20,12 +20,15 @@ import logging
 import os
 import socket as socket_module
 import sys
+import time as _time
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(__file__))
 import config
+import dream_node
+from dream_node import DREAM_INTERVAL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -195,10 +198,12 @@ async def run():
         log.info("ProactiveNode disabled (PROACTIVE_ENABLED=0) — exiting")
         return
 
-    log.info(f"ProactiveNode started — interval {INTERVAL}s, tz={config.USER_TIMEZONE}")
+    log.info(f"ProactiveNode started — interval {INTERVAL}s, dream_interval {DREAM_INTERVAL}s, tz={config.USER_TIMEZONE}")
 
     # Stagger first check-in so session_manager has time to fully start
     await asyncio.sleep(30)
+
+    _last_dream_time: float = 0.0
 
     while True:
         try:
@@ -210,6 +215,16 @@ async def run():
             # Regular context-aware check-in
             prompt = _build_prompt()
             _send_to_session(prompt)
+
+            # Dream tick — on a separate (longer) interval
+            now = _time.time()
+            if now - _last_dream_time >= DREAM_INTERVAL:
+                dream_prompt = dream_node.build_dream_prompt()
+                if dream_prompt:
+                    await asyncio.sleep(5)  # let check-in response settle first
+                    _send_to_session(dream_prompt)
+                    log.info("Dream tick sent to session_manager")
+                _last_dream_time = now
         except Exception as e:
             log.error(f"Check-in error: {e}")
 

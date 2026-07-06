@@ -1,4 +1,9 @@
 python-telegram-bot==22.7
+openai==2.38.0
 groq==1.1.2
-mcp
-zhipuai
+httpx==0.28.1
+python-dotenv==1.2.2
+mcp==1.27.0
+zhipuai==2.1.5.20250825
+PyMuPDF==1.27.2.3
+anthropic>=0.40.0

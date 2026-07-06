@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Must match config.py
-PERMISSION_SOCK = "/tmp/cognitive-hq/permission.sock"
+PERMISSION_SOCK = "/tmp/axon/permission.sock"
 ATTEMPT_TIMEOUT = 120  # seconds to wait per attempt
 MAX_RETRIES = 3       # deny after this many unanswered attempts
 LOG_FILE = "/tmp/permission_hook.log"
@@ -72,6 +72,10 @@ def _auto_decision(tool_name: str, tool_input: dict) -> str | None:
     if auto in ("0", "false", "no", "off"):
         return None
 
+    # ── MCP tools — always allow ──────────────────────────────────────────
+    if tool_name.startswith("mcp__"):
+        return "allow"
+
     # ── Always-safe read-only tools ───────────────────────────────────────
     if tool_name in ("Read", "Glob", "Grep", "LS", "NotebookRead"):
         return "allow"
@@ -98,35 +102,6 @@ def _auto_decision(tool_name: str, tool_input: dict) -> str | None:
         first_line = command.split("\n")[0]
         if _DANGEROUS_BASH.search(first_line):
             return None  # ask user — don't auto-deny, let them decide
-        return "allow"
-
-    # ── Supabase MCP ──────────────────────────────────────────────────────
-    if tool_name == "mcp__supabase__execute_sql":
-        query = tool_input.get("query", "").strip().upper()
-        # Always allow read-only queries
-        if query.startswith("SELECT"):
-            return "allow"
-        # Allow INSERT/UPDATE on safe personal tables
-        _SAFE_TABLES = (
-            "FOOD_ENTRIES", "FITNESS_LOG", "GROCERY_LIST",
-            "CAR_EVENTS", "PERSONAL_TASKS", "MEMORY",
-            "MESSAGES", "SEWAGE_PAYMENTS",
-        )
-        if query.startswith(("INSERT", "UPDATE")):
-            for tbl in _SAFE_TABLES:
-                if tbl in query:
-                    return "allow"
-        return None  # DELETE or unknown table — ask
-
-    # Auto-allow other read-only Supabase MCP tools
-    if tool_name in (
-        "mcp__supabase__list_tables",
-        "mcp__supabase__get_project",
-        "mcp__supabase__get_project_url",
-        "mcp__supabase__get_publishable_keys",
-        "mcp__supabase__list_projects",
-        "mcp__supabase__search_docs",
-    ):
         return "allow"
 
     # Unknown tool — ask

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 SessionManagerNode — Relay v2
 
@@ -62,11 +63,6 @@ _POLL_INTERVAL = 0.5
 # If file has stopped growing for this long with no "text" entry, return
 # whatever text we have (catches cases where Claude ends on a tool_use)
 _STALL_FALLBACK = 30.0
-# If the JSONL shows ZERO activity after this many seconds, bail out early.
-# Covers context-full sessions where Claude freezes and never writes anything.
-_NO_ACTIVITY_TIMEOUT = 120.0
-# Warn in logs when session JSONL exceeds this size (bytes). ~10 MB.
-_SESSION_SIZE_WARN = 10 * 1024 * 1024
 
 
 @dataclass
@@ -138,6 +134,9 @@ class SessionManagerNode:
         if profile:
             parts.append(f"\nProfile:\n{profile}")
         if not config.SKIP_MEMORY_FETCH:
+            skills_index = supabase_client.fetch_skills_index()
+            if skills_index:
+                parts.append(f"\n{skills_index}")
             memory_context = supabase_client.fetch_memory_context()
             if memory_context:
                 parts.append(f"\n{memory_context}")
@@ -207,19 +206,14 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _spawn_claude(self):
-        cmd = [config.CLAUDE_PATH, "--dangerously-skip-permissions"]
+        cmd = [config.CLAUDE_PATH]
 
         existing_session = self._get_saved_session_id()
         self._spawn_time = time.time()
         if existing_session:
-            session_file = self._get_session_file_path(existing_session)
-            if session_file.exists():
-                cmd += ["--resume", existing_session]
-                self.current_session_id = existing_session
-                log.info(f"Resuming session: {existing_session[:8]}...")
-            else:
-                log.warning(f"Saved session {existing_session[:8]}... not found on disk — starting fresh")
-                Path(config.SESSION_ID_FILE).unlink(missing_ok=True)
+            cmd += ["--resume", existing_session]
+            self.current_session_id = existing_session
+            log.info(f"Resuming session: {existing_session[:8]}...")
         else:
             log.info("Starting new session (ID captured on first response)")
 
@@ -232,6 +226,7 @@ class SessionManagerNode:
         self._set_pty_size(master_fd, rows, cols)
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        env["CLAUDE_RELAY_SESSION"] = "1"
 
         proc = subprocess.Popen(
             cmd,
@@ -322,6 +317,11 @@ class SessionManagerNode:
         clean = self._ANSI_RE.sub(b'', raw)
         text = clean.decode('utf-8', errors='replace')
 
+        # Real Claude TUI prompts always show a ❯ cursor. Bail early if absent
+        # to avoid false positives from numbered lists in injected protocol text.
+        if '❯' not in text:
+            return
+
         # Look for 2+ consecutive numbered choices
         lines = text.splitlines()
         choices = []
@@ -376,6 +376,19 @@ class SessionManagerNode:
             for conn in dead:
                 self.response_subscribers.remove(conn)
 
+    def _publish_activity(self, growing: bool):
+        payload = json.dumps({"type": "activity", "growing": growing}) + "\n"
+        payload_bytes = payload.encode()
+        with self.response_subs_lock:
+            dead = []
+            for conn in self.response_subscribers:
+                try:
+                    conn.sendall(payload_bytes)
+                except Exception:
+                    dead.append(conn)
+            for conn in dead:
+                self.response_subscribers.remove(conn)
+
     # ------------------------------------------------------------------
     # JSONL response detection
     # ------------------------------------------------------------------
@@ -383,15 +396,15 @@ class SessionManagerNode:
     def _get_jsonl_state(self, session_file: Path, offset: int) -> tuple[Optional[str], Optional[str]]:
         """
         Scan assistant entries from `offset`.
-        Returns (last_text, last_assistant_type) where:
-          last_text            — text from the most recent assistant text entry
+        Returns (combined_text, last_assistant_type) where:
+          combined_text        — all assistant text blocks joined with double newline
           last_assistant_type  — content type of the very last assistant entry
                                  ("text", "tool_use", "thinking", …)
 
-        Each content block is its own JSONL line, so we can tell whether Claude
-        is mid-tool-call (last type = "tool_use") or done (last type = "text").
+        Accumulates ALL text blocks across entries so multi-step responses
+        (text → tool_use → text) are not truncated to just the final block.
         """
-        last_text: Optional[str] = None
+        text_blocks: list[str] = []
         last_assistant_type: Optional[str] = None
         try:
             if not session_file.exists():
@@ -416,17 +429,18 @@ class SessionManagerNode:
                                 if ctype == "text":
                                     text = c.get("text", "").strip()
                                     if text:
-                                        last_text = text
+                                        text_blocks.append(text)
                         else:
                             text = str(content).strip()
                             if text:
-                                last_text = text
+                                text_blocks.append(text)
                                 last_assistant_type = "text"
                     except (json.JSONDecodeError, AttributeError):
                         continue
         except Exception:
             pass
-        return last_text, last_assistant_type
+        combined = "\n\n".join(text_blocks) if text_blocks else None
+        return combined, last_assistant_type
 
     def _sessions_dir(self) -> Path:
         project_name = config.PROJECT_DIR.replace("/", "-").replace("_", "-")
@@ -456,6 +470,7 @@ class SessionManagerNode:
         _DEBOUNCE = 1.5  # seconds of silence after last "text" entry → done
 
         deadline = time.time() + _RESPONSE_TIMEOUT
+        _partial_text: Optional[str] = None  # best text seen so far, for timeout fallback
 
         if session_file is not None:
             # Known session — poll the specific file.
@@ -464,7 +479,6 @@ class SessionManagerNode:
             last_file_size = initial_size
             last_activity_time: float = 0.0
             activity_seen = False
-            no_activity_deadline = time.time() + _NO_ACTIVITY_TIMEOUT
 
             while time.time() < deadline and self._running:
                 time.sleep(_POLL_INTERVAL)
@@ -477,22 +491,13 @@ class SessionManagerNode:
                     activity_seen = True
                     last_file_size = current_size
                     last_activity_time = time.time()
+                    self._publish_activity(growing=True)
                     text, atype = self._get_jsonl_state(session_file, initial_size)
                     if text:
                         last_text = text
+                        _partial_text = text
                     if atype:
                         last_assistant_type = atype
-
-                # Early exit: JSONL never grew — Claude is frozen (context full?).
-                if not activity_seen and time.time() > no_activity_deadline:
-                    log.error(
-                        f"No JSONL activity after {_NO_ACTIVITY_TIMEOUT:.0f}s — "
-                        "Claude may be frozen (context full). Bailing out early."
-                    )
-                    return (
-                        "(no response — session may be stuck or context full. "
-                        "Try /compact or send a message to restart the session.)"
-                    )
 
                 elapsed = time.time() - last_activity_time
                 # Primary: last entry is "text" and file has been quiet for DEBOUNCE.
@@ -551,9 +556,11 @@ class SessionManagerNode:
                             file_activity_seen[f] = True
                             file_last_size[f] = current_size
                             file_last_activity[f] = time.time()
+                            self._publish_activity(growing=True)
                             text, atype = self._get_jsonl_state(f, offset)
                             if text:
                                 file_last_text[f] = text
+                                _partial_text = text
                             if atype:
                                 file_last_atype[f] = atype
 
@@ -574,7 +581,10 @@ class SessionManagerNode:
                     log.warning(f"Session scan error: {e}")
 
         log.error("Timeout waiting for JSONL response")
-        return "(response timed out — please try again)"
+        if _partial_text:
+            log.warning("Returning partial text after timeout")
+            return _partial_text + "\n\n_(Response may be incomplete — timed out after 10 min.)_"
+        return "⌛ No response in 10 minutes. Claude may not have received the message. Send /restart to reset the session."
 
     # ------------------------------------------------------------------
     # Queue processor thread (state machine)
@@ -607,16 +617,23 @@ class SessionManagerNode:
                 session_file: Optional[Path] = self._get_session_file_path(self.current_session_id)
                 try:
                     initial_size = session_file.stat().st_size if session_file.exists() else 0
-                    if initial_size > _SESSION_SIZE_WARN:
-                        log.warning(
-                            f"Session JSONL is {initial_size / 1024 / 1024:.1f} MB "
-                            f"({self.current_session_id[:8]}...) — consider /compact"
-                        )
                 except Exception:
                     initial_size = 0
             else:
                 session_file = None
                 initial_size = 0
+
+            # Prepend permanent rules (always) + keyword-matched rules.
+            permanent_rules = supabase_client.fetch_permanent_rules()
+            relevant_rules = supabase_client.fetch_relevant_rules(item.text)
+            prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
+            message_text = (prefix + item.text) if prefix else item.text
+
+            # Inject semantically relevant dreams for real user messages.
+            if item.source == "telegram":
+                dream_context = supabase_client.fetch_relevant_dreams(item.text)
+                if dream_context:
+                    message_text = dream_context + "\n\n" + message_text
 
             # Inject message via PTY.
             # Claude's TUI runs in raw terminal mode: Enter = \r (not \n).
@@ -624,7 +641,7 @@ class SessionManagerNode:
             # cause long messages (e.g. transcribed voice notes) to lose the
             # trailing \r, leaving the message sitting unsubmitted in the TUI.
             try:
-                encoded = item.text.encode()
+                encoded = message_text.encode()
                 chunk_size = 256
                 for i in range(0, len(encoded), chunk_size):
                     os.write(self.master_fd, encoded[i:i + chunk_size])
