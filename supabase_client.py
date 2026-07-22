@@ -593,7 +593,7 @@ def fetch_skill_by_name(name: str) -> str:
         return f"[skill '{name}' fetch error: {e}]"
 
 
-def _fetch_all_rules() -> list[dict]:
+def _fetch_all_rules() -> list:
     """Fetch all active rules (content + keywords) from Supabase."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return []

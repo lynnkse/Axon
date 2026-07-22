@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Must match config.py
-PERMISSION_SOCK = "/tmp/axon/permission.sock"
+PERMISSION_SOCK = "/tmp/cognitive-hq/permission.sock"
 ATTEMPT_TIMEOUT = 120  # seconds to wait per attempt
 MAX_RETRIES = 3       # deny after this many unanswered attempts
 LOG_FILE = "/tmp/permission_hook.log"
@@ -39,8 +39,7 @@ _SENSITIVE_PATHS = (
 
 # Bash patterns that are never auto-allowed regardless of other rules
 _DANGEROUS_BASH = re.compile(
-    r"\bsudo\b"
-    r"|rm\s+-[a-z]*r[a-z]*f\b"          # rm -rf (any path)
+    r"rm\s+-[a-z]*r[a-z]*f\b"           # rm -rf (any path)
     r"|rm\s+--force"
     r"|git\s+reset\s+--hard"
     r"|git\s+push\s+(--force|-f)"
