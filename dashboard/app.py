@@ -57,8 +57,8 @@ def _sb_get(table: str, params: str = "") -> list:
 st.set_page_config(page_title="Axon Dashboard", page_icon="⚡", layout="wide")
 st.title("⚡ Axon Dashboard")
 
-tab_food, tab_fitness, tab_alive, tab_files = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files"]
+tab_food, tab_fitness, tab_alive, tab_files, tab_split = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files", "⚡ Split View"]
 )
 
 # ── Tab: Food Today ───────────────────────────────────────────────────────────
@@ -202,3 +202,36 @@ with tab_files:
             st.download_button("⬇ Download PDF", data, file_name=full_path.name, mime="application/pdf")
     else:
         st.info("No HTML or PDF files found in ~/Axon/")
+
+# ── Tab: Split View ───────────────────────────────────────────────────────────
+with tab_split:
+    st.subheader("Split View — CLI + File Viewer")
+
+    # File picker at the top
+    html_files_s = sorted(DOCS_DIR.glob("**/*.html"))
+    pdf_files_s  = sorted(DOCS_DIR.glob("**/*.pdf"))
+    all_files_s  = html_files_s + pdf_files_s
+    file_names_s = [str(f.relative_to(DOCS_DIR)) for f in all_files_s]
+
+    selected_s = st.selectbox("File to display on the right", file_names_s if file_names_s else ["(none)"], key="split_file")
+
+    col_cli, col_viewer = st.columns(2)
+
+    with col_cli:
+        st.markdown("**CLI stream**")
+        # ttyd runs on the same host, port 7681 — embed via iframe
+        TAILSCALE_IP = "100.73.56.102"
+        st.components.v1.iframe(f"http://{TAILSCALE_IP}:7681", height=640, scrolling=False)
+
+    with col_viewer:
+        st.markdown("**File viewer**")
+        if file_names_s and selected_s != "(none)":
+            full_path_s = DOCS_DIR / selected_s
+            if full_path_s.suffix == ".html":
+                content_s = full_path_s.read_text(encoding="utf-8", errors="replace")
+                st.components.v1.html(content_s, height=640, scrolling=True)
+            elif full_path_s.suffix == ".pdf":
+                data_s = full_path_s.read_bytes()
+                st.download_button("⬇ Download PDF", data_s, file_name=full_path_s.name, mime="application/pdf")
+        else:
+            st.info("No files found in ~/Axon/")
