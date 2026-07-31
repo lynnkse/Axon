@@ -55,7 +55,25 @@ def _sb_get(table: str, params: str = "") -> list:
 
 # ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Axon Dashboard", page_icon="⚡", layout="wide")
-st.title("⚡ Axon Dashboard")
+
+st.markdown("""
+<style>
+/* Remove Streamlit chrome padding */
+#root > div:first-child { padding-top: 0 !important; }
+.block-container { padding: 0.5rem 1rem 0 1rem !important; max-width: 100% !important; }
+header[data-testid="stHeader"] { display: none !important; }
+footer { display: none !important; }
+/* Tighten tab bar */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] { padding: 4px 12px; }
+/* Remove subheader margin in split view */
+.split-label { font-size: 0.75rem; color: #888; margin-bottom: 2px; }
+/* Make iframes fill their column */
+iframe { width: 100% !important; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("##### ⚡ Axon Dashboard")
 
 tab_food, tab_fitness, tab_alive, tab_files, tab_split = st.tabs(
     ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files", "⚡ Split View"]
@@ -205,31 +223,29 @@ with tab_files:
 
 # ── Tab: Split View ───────────────────────────────────────────────────────────
 with tab_split:
-    st.subheader("Split View — CLI + File Viewer")
+    TAILSCALE_IP = "100.73.56.102"
+    PANE_H = 820
 
-    # File picker at the top
     html_files_s = sorted(DOCS_DIR.glob("**/*.html"))
     pdf_files_s  = sorted(DOCS_DIR.glob("**/*.pdf"))
     all_files_s  = html_files_s + pdf_files_s
     file_names_s = [str(f.relative_to(DOCS_DIR)) for f in all_files_s]
 
-    selected_s = st.selectbox("File to display on the right", file_names_s if file_names_s else ["(none)"], key="split_file")
+    selected_s = st.selectbox("", file_names_s if file_names_s else ["(none)"], key="split_file", label_visibility="collapsed")
 
-    col_cli, col_viewer = st.columns(2)
+    col_cli, col_viewer = st.columns(2, gap="small")
 
     with col_cli:
-        st.markdown("**CLI stream**")
-        # ttyd runs on the same host, port 7681 — embed via iframe
-        TAILSCALE_IP = "100.73.56.102"
-        st.components.v1.iframe(f"http://{TAILSCALE_IP}:7681", height=640, scrolling=False)
+        st.markdown('<p class="split-label">CLI</p>', unsafe_allow_html=True)
+        st.components.v1.iframe(f"http://{TAILSCALE_IP}:7681", height=PANE_H, scrolling=False)
 
     with col_viewer:
-        st.markdown("**File viewer**")
+        st.markdown('<p class="split-label">File viewer</p>', unsafe_allow_html=True)
         if file_names_s and selected_s != "(none)":
             full_path_s = DOCS_DIR / selected_s
             if full_path_s.suffix == ".html":
                 content_s = full_path_s.read_text(encoding="utf-8", errors="replace")
-                st.components.v1.html(content_s, height=640, scrolling=True)
+                st.components.v1.html(content_s, height=PANE_H, scrolling=True)
             elif full_path_s.suffix == ".pdf":
                 data_s = full_path_s.read_bytes()
                 st.download_button("⬇ Download PDF", data_s, file_name=full_path_s.name, mime="application/pdf")
