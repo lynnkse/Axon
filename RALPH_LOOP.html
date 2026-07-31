@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ralph Loop — Axon Multi-Agent Architecture</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --surface: #141820;
+    --surface2: #1c2230;
+    --border: #2a3347;
+    --accent: #4f8ef7;
+    --accent2: #7c5cbf;
+    --accent3: #e05c5c;
+    --accent4: #4fbd8e;
+    --text: #c9d1e0;
+    --text-dim: #6b7a99;
+    --text-bright: #eef2ff;
+    --mono: 'Fira Mono', 'Consolas', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    padding: 40px 20px;
+  }
+
+  .page { max-width: 960px; margin: 0 auto; }
+
+  /* Header */
+  .header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+    margin-bottom: 40px;
+  }
+  .header-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  h1 {
+    font-size: 36px;
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 15px;
+  }
+  .meta {
+    margin-top: 16px;
+    display: flex;
+    gap: 20px;
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+  .meta span { color: var(--accent4); }
+
+  /* Sections */
+  section { margin-bottom: 48px; }
+
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: rgba(79,142,247,0.1);
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+
+  h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+    margin-top: 20px;
+  }
+
+  p { margin-bottom: 12px; color: var(--text); }
+
+  /* Diagram box */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .diagram pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--text);
+    white-space: pre;
+  }
+  .diagram pre .hl  { color: var(--accent); }
+  .diagram pre .hl2 { color: var(--accent4); }
+  .diagram pre .hl3 { color: var(--accent2); }
+  .diagram pre .hl4 { color: var(--accent3); }
+  .diagram pre .dim { color: var(--text-dim); }
+
+  /* Cards grid */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card-icon {
+    font-size: 22px;
+    margin-bottom: 10px;
+  }
+  .card h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 6px;
+  }
+  .card p {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+  .card.blue  { border-color: rgba(79,142,247,0.3); }
+  .card.green { border-color: rgba(79,189,142,0.3); }
+  .card.purple{ border-color: rgba(124,92,191,0.3); }
+  .card.red   { border-color: rgba(224,92,92,0.3); }
+
+  /* Loop visualization */
+  .loop-vis {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 32px;
+    margin: 20px 0;
+    position: relative;
+  }
+  .loop-stages {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+  }
+  .stage {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    text-align: center;
+    min-width: 130px;
+  }
+  .stage .stage-label {
+    font-size: 11px;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .stage .stage-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+  }
+  .stage.accent  .stage-name { color: var(--accent); }
+  .stage.green   .stage-name { color: var(--accent4); }
+  .stage.purple  .stage-name { color: var(--accent2); }
+  .stage.red     .stage-name { color: var(--accent3); }
+  .arrow {
+    color: var(--text-dim);
+    font-size: 20px;
+    padding: 0 8px;
+  }
+  .loop-label {
+    text-align: center;
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  /* Protocol table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  th {
+    background: var(--surface2);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    color: var(--text);
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  td code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: rgba(79,142,247,0.08);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  /* Code block */
+  .code-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin: 16px 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+  .code-block .kw  { color: var(--accent2); }
+  .code-block .fn  { color: var(--accent); }
+  .code-block .str { color: var(--accent4); }
+  .code-block .cmt { color: var(--text-dim); font-style: italic; }
+  .code-block .num { color: #f0a05a; }
+
+  /* Status badge */
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .badge.pending  { background: rgba(240,160,90,0.15); color: #f0a05a; }
+  .badge.planned  { background: rgba(79,142,247,0.15); color: var(--accent); }
+  .badge.done     { background: rgba(79,189,142,0.15); color: var(--accent4); }
+
+  /* Warning / note box */
+  .note {
+    background: rgba(79,142,247,0.07);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 14px 18px;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .note.warn {
+    background: rgba(224,92,92,0.07);
+    border-color: var(--accent3);
+  }
+  .note.green {
+    background: rgba(79,189,142,0.07);
+    border-color: var(--accent4);
+  }
+
+  /* Phase timeline */
+  .phases { margin: 20px 0; }
+  .phase {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 16px;
+  }
+  .phase-num {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-top: 2px;
+  }
+  .phase-content h4 {
+    font-size: 14px;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+  }
+  .phase-content p {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+  .phase-content .badge { margin-left: 8px; }
+
+  /* Footer */
+  .footer {
+    margin-top: 60px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-tag">Axon / Architecture Design</div>
+    <h1>Ralph Loop</h1>
+    <p class="subtitle">Always-on autonomous multi-agent execution — design specification</p>
+    <div class="meta">
+      Created: <span>2026-07-11</span>
+      &nbsp;·&nbsp; Project: <span>Axon</span>
+      &nbsp;·&nbsp; Priority: <span>HIGH</span>
+      &nbsp;·&nbsp; Target: <span>Aug 2026</span>
+      &nbsp;·&nbsp; Status: <span>DESIGN PHASE</span>
+    </div>
+  </div>
+
+  <!-- 1. Concept -->
+  <section>
+    <h2><span class="num">01</span> The Core Idea</h2>
+    <p>
+      The Ralph Loop is an always-on autonomous execution architecture for Axon. Instead of waiting for user input to trigger actions, Axon agents run in a continuous loop, execute tasks autonomously, coordinate with each other via Telegram, and only surface to the user when a decision is required.
+    </p>
+    <p>
+      Two Axon instances already run simultaneously (ROG + Leonid). Both already communicate via Telegram. The Ralph Loop formalizes this into a structured multi-agent coordination system with shared goal context, inter-agent sync, and a meta-loop that prevents context degradation.
+    </p>
+
+    <div class="cards">
+      <div class="card blue">
+        <div class="card-icon">🔁</div>
+        <h4>Autonomous Execution Loop</h4>
+        <p>Agent runs while-true: execute → test → evaluate → loop. Stops only on success, stuck state, or human interrupt.</p>
+      </div>
+      <div class="card green">
+        <div class="card-icon">🤝</div>
+        <h4>Peer Communication</h4>
+        <p>Two agents talk directly over Telegram. Shared Supabase state = shared goals. Neither agent is isolated.</p>
+      </div>
+      <div class="card purple">
+        <div class="card-icon">🧠</div>
+        <h4>Meta Loop / Context Reset</h4>
+        <p>Periodic context reset prevents solution collapse (Karpathy effect). Agent stays sharp over long runs.</p>
+      </div>
+      <div class="card red">
+        <div class="card-icon">🚦</div>
+        <h4>Backpressure + Escalation</h4>
+        <p>AGENTS.md CI check prevents agents going off-rails. Failure budget (N tries = ask human) prevents infinite loops.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Single-agent loop -->
+  <section>
+    <h2><span class="num">02</span> Single-Agent Ralph Loop</h2>
+    <p>The base layer: one Axon instance running an autonomous task loop.</p>
+
+    <div class="loop-vis">
+      <div class="loop-stages">
+        <div class="stage accent">
+          <div class="stage-label">Start</div>
+          <div class="stage-name">Load Task</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="stage">
+          <div class="stage-label">Step 1</div>
+          <div class="stage-name">Brainstorm</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="stage">
+          <div class="stage-label">Step 2</div>
+          <div class="stage-name">Execute</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="stage">
+          <div class="stage-label">Step 3</div>
+          <div class="stage-name">Test</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="stage">
+          <div class="stage-label">Step 4</div>
+          <div class="stage-name">Evaluate</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="stage green">
+          <div class="stage-label">Exit?</div>
+          <div class="stage-name">Done / Stuck</div>
+        </div>
+      </div>
+      <div class="loop-label">↺ while-true — loops back to Execute until success, stuck (N failures), or human interrupt</div>
+    </div>
+
+    <h3>Exit Conditions</h3>
+    <table>
+      <tr>
+        <th>Condition</th>
+        <th>Trigger</th>
+        <th>Action</th>
+      </tr>
+      <tr>
+        <td>✅ Success</td>
+        <td>Tests pass, output matches spec</td>
+        <td>Mark task done, notify human, pick next task</td>
+      </tr>
+      <tr>
+        <td>🟡 Stuck</td>
+        <td>N consecutive failures (default: 3)</td>
+        <td>Escalate to human with context + what was tried</td>
+      </tr>
+      <tr>
+        <td>🔴 Off-rails</td>
+        <td>AGENTS.md CI check fails (backpressure)</td>
+        <td>Hard stop, log, notify human</td>
+      </tr>
+      <tr>
+        <td>⏸ Interrupt</td>
+        <td>Human sends interrupt via Telegram</td>
+        <td>Pause at next safe checkpoint</td>
+      </tr>
+      <tr>
+        <td>🔄 Context full</td>
+        <td>Context hits Meta Loop threshold</td>
+        <td>Compress + reset — continue with clean context</td>
+      </tr>
+    </table>
+
+    <h3>Meta Loop — Karpathy Effect Prevention</h3>
+    <div class="note warn">
+      <strong>The Karpathy Effect:</strong> As context grows, LLMs converge toward the path-of-least-resistance in their accumulated context and stop exploring alternatives. They "collapse" into a local optimum. This gets worse past ~30K tokens. A periodic context reset breaks the collapse.
+    </div>
+    <p>Every N iterations (or when context exceeds threshold), the Meta Loop:</p>
+    <ol style="margin-left:20px; color:var(--text); font-size:14px; line-height:2;">
+      <li>Compresses accumulated context into a structured summary (goal, what was tried, current state, blockers)</li>
+      <li>Resets the agent with the compressed summary as fresh context</li>
+      <li>Continues from the same task — but with a clean perspective</li>
+    </ol>
+  </section>
+
+  <!-- 3. Two-session architecture -->
+  <section>
+    <h2><span class="num">03</span> Two-Session Architecture</h2>
+    <p>Each Ralph Loop runs as two Claude sessions — logic and execution separated by a security + sanity boundary.</p>
+
+    <div class="diagram">
+      <pre>
+  ┌─────────────────────────────────────────────────────────┐
+  │                    SESSION 1: LOGIC                      │
+  │              (DeepSeek R1 / Claude Opus)                 │
+  │                                                          │
+  │  • Holds the task spec + success criteria                │
+  │  • Evaluates execution output                            │
+  │  • Decides: loop / escalate / done                       │
+  │  • Never touches disk or network directly                │
+  └────────────────────────┬────────────────────────────────┘
+                           │  structured handoff
+                           ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │                  SESSION 2: EXECUTION                    │
+  │              (Claude Code / DeepSeek V3)                 │
+  │                                                          │
+  │  • Writes code, edits files, runs bash                   │
+  │  • Runs tests, reports results back to Session 1         │
+  │  • Constrained by permission_hook.py                     │
+  │  • Stateless between iterations                          │
+  └─────────────────────────────────────────────────────────┘
+</pre>
+    </div>
+
+    <div class="note">
+      <strong>Why two sessions?</strong> The logic session maintains the spec and evaluates progress without being contaminated by execution details. The execution session can fail, get confused, or go off-track — without corrupting the goal representation held by Session 1.
+    </div>
+
+    <h3>Handoff Protocol</h3>
+    <table>
+      <tr>
+        <th>Direction</th>
+        <th>Message Type</th>
+        <th>Contains</th>
+      </tr>
+      <tr>
+        <td>S1 → S2</td>
+        <td><code>TASK_SPEC</code></td>
+        <td>Goal, constraints, success criteria, failure budget remaining</td>
+      </tr>
+      <tr>
+        <td>S2 → S1</td>
+        <td><code>EXEC_RESULT</code></td>
+        <td>What was done, test output, current state, confidence level</td>
+      </tr>
+      <tr>
+        <td>S1 → S2</td>
+        <td><code>LOOP_CONTINUE</code></td>
+        <td>Evaluation, hint for next iteration, updated constraints</td>
+      </tr>
+      <tr>
+        <td>S1 → Human</td>
+        <td><code>ESCALATE</code></td>
+        <td>Stuck reason, what was tried, specific question for human</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- 4. Multi-agent peer communication -->
+  <section>
+    <h2><span class="num">04</span> Multi-Agent Peer Communication</h2>
+    <p>Two Axon instances (ROG + Leonid) communicate directly over Telegram to coordinate toward shared goals stored in Supabase.</p>
+
+    <div class="diagram">
+      <pre>
+                     ┌─────────────────────┐
+                     │   SUPABASE (shared) │
+                     │  personal_tasks     │
+                     │  roadmap            │
+                     │  personal_goals     │
+                     │  insights           │
+                     └──────────┬──────────┘
+                                │ read/write
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+  ┌────────────────────────┐   ┌────────────────────────┐
+  │    AXON — ROG          │   │    AXON — LEONID        │
+  │  (Claude Code / Opus)  │   │  (DeepSeek / local LLM) │
+  │                        │   │                         │
+  │  Current task: [X]     │   │  Current task: [Y]      │
+  │  Blockers: [...]       │   │  Blockers: [...]        │
+  └───────────┬────────────┘   └────────────┬────────────┘
+              │                              │
+              └──────────┬───────────────────┘
+                         │  Telegram peer channel
+                         ▼
+              ┌──────────────────────┐
+              │    SYNC MESSAGES     │
+              │  periodic heartbeat  │
+              │  blocker sharing     │
+              │  task coordination   │
+              └──────────┬───────────┘
+                         │  escalate only decisions
+                         ▼
+                    ┌──────────┐
+                    │  ANTON   │
+                    └──────────┘
+</pre>
+    </div>
+
+    <h3>Sync Protocol — What Agents Say to Each Other</h3>
+    <p>Every N hours, the scheduler sends a sync ping to both agents. Each agent responds with a structured status:</p>
+
+    <div class="code-block">
+<span class="cmt"># SYNC MESSAGE FORMAT (agent → peer channel)</span>
+
+AXON-ROG STATUS [2026-07-11 14:30]
+Current task: Implement PDF ingestion for study module
+Progress: kb_ingest.py refactored, 80% done
+Blocker: None
+Supabase writes since last sync: 3 (study_books, kb_chunks x2)
+Flagging: Nothing needs human input
+
+AXON-LEONID STATUS [2026-07-11 14:31]
+Current task: Ailin inference — dolphin-mistral-nemo serving
+Progress: Ollama running, model loaded, API tested
+Blocker: VRAM pressure when concurrent requests >2
+Flagging: ⚠️ Need decision — queue single-file or add swap?
+    </div>
+
+    <h3>Escalation Filter</h3>
+    <p>The peer channel is invisible to Anton by default. Agents only forward to the main chat when:</p>
+    <table>
+      <tr><th>Trigger</th><th>What Gets Sent</th></tr>
+      <tr><td>Genuine decision required (not just info)</td><td>Specific question with context + options</td></tr>
+      <tr><td>Failure budget exhausted</td><td>Full debug summary + what was tried</td></tr>
+      <tr><td>Agents disagree on approach</td><td>Both positions + recommendation</td></tr>
+      <tr><td>New task needed (backlog empty)</td><td>Proposed next tasks from roadmap</td></tr>
+    </table>
+
+    <div class="note green">
+      <strong>Key invariant:</strong> Anton only sees decisions, not process. The agents handle all back-and-forth internally. Signal-to-noise stays high.
+    </div>
+  </section>
+
+  <!-- 5. Conductor Pattern -->
+  <section>
+    <h2><span class="num">05</span> Conductor Pattern — Scrum Master Node</h2>
+    <p>
+      A dedicated conductor agent acts as the scrum master of the network. It lives in a shared Telegram group alongside all worker nodes, proactively initiates communication, assigns tasks from the backlog, removes blockers, and escalates to Anton only when a real decision is needed.
+    </p>
+
+    <div class="note green">
+      <strong>Scrum master analogy:</strong> The conductor runs standups, assigns from backlog, unblocks — but doesn't do the work itself. Unlike a human scrum master, it has full read/write access to Supabase, so it maintains perfect situational awareness at all times.
+    </div>
+
+    <h3>Two-Layer Architecture</h3>
+    <div class="cards">
+      <div class="card blue">
+        <div class="card-icon">📡</div>
+        <h4>Transport Layer (always-running)</h4>
+        <p>Lightweight Python process. Sends/receives Telegram messages, routes by header, logs to Supabase. No LLM calls. Costs nothing at idle. Runs on cron or event loop.</p>
+      </div>
+      <div class="card purple">
+        <div class="card-icon">🧠</div>
+        <h4>Reasoning Layer (on-demand)</h4>
+        <p>Claude Haiku / Code session, fired per-event only. Called when conductor needs to make a non-trivial decision: task conflict, stuck agent, priority change. NOT always running.</p>
+      </div>
+    </div>
+
+    <h3>Telegram Group Communication Protocol</h3>
+    <p>All nodes (conductor + workers) are members of a dedicated Telegram group. Messages carry structured headers for routing. Human can lurk silently or be excluded entirely.</p>
+
+    <div class="diagram">
+      <pre>
+  ┌─────────────────────────────────────────────────────────────┐
+  │              AXON NETWORK — Telegram Group                   │
+  │                                                             │
+  │  Members: CONDUCTOR · ROG · LEONID · [ANTON — optional]     │
+  └─────────────────────────────────────────────────────────────┘
+
+  MESSAGE HEADER FORMAT:
+  ─────────────────────────────────────────────────────────────
+  [TO:{recipients}] [FROM:{sender}] [TYPE:{type}]  body...
+  ─────────────────────────────────────────────────────────────
+
+  Recipients:   ALL  |  ROG  |  LEONID  |  CONDUCTOR  |  ANTON
+  Types:        STANDUP  |  STATUS  |  TASK  |  BLOCKER  |
+                DECISION  |  FYI  |  ONLINE  |  OFFLINE
+
+  EXAMPLES:
+  ─────────────────────────────────────────────────────────────
+  [TO:ALL]       [FROM:CONDUCTOR] [TYPE:STANDUP]
+  Daily sync — report status + blockers.
+
+  [TO:CONDUCTOR] [FROM:ROG]       [TYPE:STATUS]
+  Task: PDF ingestion — 80% done. No blockers.
+  Supabase writes: 3. ETA: 2h.
+
+  [TO:CONDUCTOR] [FROM:LEONID]    [TYPE:BLOCKER]
+  Stuck on Ailin VRAM — queue single-file or add swap?
+  Failure budget: 2/3 attempts used.
+
+  [TO:ROG]       [FROM:CONDUCTOR] [TYPE:TASK]
+  Assign: implement claimed_by field in personal_tasks.
+  Success criteria: field added + tested. Failure budget: 3.
+
+  [TO:ANTON]     [FROM:CONDUCTOR] [TYPE:DECISION]
+  Leonid VRAM blocker — two options: (A) queue single-file
+  (B) add 8GB swap. Recommendation: A. Awaiting decision.
+
+  [TO:ALL]       [FROM:ROG]       [TYPE:FYI]
+  Completed: PDF ingestion. kb_chunks: +47 rows added.
+  ─────────────────────────────────────────────────────────────
+</pre>
+    </div>
+
+    <h3>Node Registration Protocol</h3>
+    <p>When any Axon instance starts, it announces itself to the conductor:</p>
+
+    <div class="code-block">
+<span class="cmt"># On startup — every node sends:</span>
+[TO:CONDUCTOR] [FROM:ROG] [TYPE:ONLINE]
+Capabilities: Claude-Code, Supabase-RW, SSH-Leonid, Telegram-send
+Current load: idle
+Available for task assignment: YES
+
+<span class="cmt"># Conductor maintains live registry in Supabase:</span>
+<span class="str">conductor_registry</span> {
+  node_id:       <span class="str">"ROG"</span>,
+  last_seen:     <span class="str">"2026-07-11T14:30:00Z"</span>,
+  capabilities:  [<span class="str">"claude-code"</span>, <span class="str">"supabase-rw"</span>, <span class="str">"ssh-leonid"</span>],
+  current_task:  <span class="str">"pdf-ingestion"</span>,
+  status:        <span class="str">"working"</span>  <span class="cmt">// idle | working | stuck | offline</span>
+}
+
+<span class="cmt"># If node goes silent > threshold → conductor flags it:</span>
+[TO:ANTON] [FROM:CONDUCTOR] [TYPE:DECISION]
+ROG has not responded in 2h. Last seen: 12:30.
+Action needed: check if process is alive.
+    </div>
+
+    <h3>Conductor Responsibilities</h3>
+    <table>
+      <tr><th>Responsibility</th><th>Trigger</th><th>Action</th></tr>
+      <tr>
+        <td>Daily standup</td>
+        <td>Cron: every morning</td>
+        <td><code>[TO:ALL] STANDUP</code> — collect status from all nodes, log to Supabase</td>
+      </tr>
+      <tr>
+        <td>Task assignment</td>
+        <td>Node reports idle / task completed</td>
+        <td>Pull top-priority unassigned task from roadmap, set <code>claimed_by</code>, send <code>[TO:NODE] TASK</code></td>
+      </tr>
+      <tr>
+        <td>Blocker resolution</td>
+        <td>Node sends <code>BLOCKER</code> or failure budget exhausted</td>
+        <td>Try to resolve via other nodes first. Escalate to Anton only if unresolvable.</td>
+      </tr>
+      <tr>
+        <td>Dead node detection</td>
+        <td>Node silent > 2h threshold</td>
+        <td>Ping node, reassign its task if no response in 30min</td>
+      </tr>
+      <tr>
+        <td>Daily digest</td>
+        <td>Cron: every evening</td>
+        <td>Send <code>[TO:ANTON]</code> summary: completed / in-progress / blocked</td>
+      </tr>
+      <tr>
+        <td>Conflict resolution</td>
+        <td>Two nodes claim same task</td>
+        <td>Reasoning layer invoked. Reassign one node to next task.</td>
+      </tr>
+    </table>
+
+    <h3>Escalation Filter — What Anton Sees</h3>
+    <div class="note">
+      The peer Telegram group is <strong>invisible to Anton by default</strong>. He only receives <code>[TO:ANTON]</code> messages. Everything else stays in the agent group. High signal-to-noise is a hard requirement.
+    </div>
+    <table>
+      <tr><th>Escalation Trigger</th><th>What Gets Sent to Anton</th></tr>
+      <tr><td>Genuine decision required (A vs B)</td><td>Both options + conductor recommendation + context</td></tr>
+      <tr><td>Failure budget exhausted on a node</td><td>What was tried, current state, specific question</td></tr>
+      <tr><td>Node offline &gt; threshold</td><td>Node ID, last seen, suggested action</td></tr>
+      <tr><td>Agents disagree on approach</td><td>Both positions + conductor vote</td></tr>
+      <tr><td>Daily digest (scheduled)</td><td>Completed / in-progress / blocked — one message</td></tr>
+    </table>
+  </section>
+
+  <!-- 6. Scheduler -->
+  <section>
+    <h2><span class="num">06</span> Scheduler / Sync Cycle</h2>
+    <p>The conductor's heartbeat — manages the sync cycle and task deduplication.</p>
+
+    <div class="cards">
+      <div class="card blue">
+        <div class="card-icon">⏱</div>
+        <h4>Sync Heartbeat</h4>
+        <p>Every 2-4 hours (or event-driven on task completion): conductor sends standup ping. Each node replies with structured status JSON within 10 minutes.</p>
+      </div>
+      <div class="card green">
+        <div class="card-icon">📋</div>
+        <h4>Goal Pull</h4>
+        <p>On each sync, conductor reads Supabase personal_tasks + roadmap. Assigns highest-priority unowned task to idle nodes. Ensures alignment to current goals.</p>
+      </div>
+      <div class="card purple">
+        <div class="card-icon">🔒</div>
+        <h4>Deduplication</h4>
+        <p><code>claimed_by</code> + <code>claimed_at</code> fields in personal_tasks. Conductor sets on assignment. Nodes cannot self-assign without conductor acknowledgment.</p>
+      </div>
+      <div class="card red">
+        <div class="card-icon">📊</div>
+        <h4>Daily Digest</h4>
+        <p>Every evening: one message to Anton. Completed tasks, in-progress with ETA, blocked with reason. No noise, just the delta since yesterday.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. Implementation phases -->
+  <section>
+    <h2><span class="num">07</span> Implementation Phases</h2>
+
+    <div class="phases">
+      <div class="phase">
+        <div class="phase-num">1</div>
+        <div class="phase-content">
+          <h4>Single-Agent Loop <span class="badge planned">PLANNED</span></h4>
+          <p>Add <code>while-true</code> outer loop to session_manager.py. Add success/stuck criteria to task spec. Implement failure budget (3 failures → escalate). Test on a real low-risk task (e.g. Supabase query optimization).</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">2</div>
+        <div class="phase-content">
+          <h4>Meta Loop / Context Reset <span class="badge planned">PLANNED</span></h4>
+          <p>Add context-length monitoring. At threshold: compress to structured summary, re-init session with summary as context. Validate that task continues correctly after reset.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">3</div>
+        <div class="phase-content">
+          <h4>Two-Session Split <span class="badge planned">PLANNED</span></h4>
+          <p>Split logic (S1) from execution (S2). Define TASK_SPEC / EXEC_RESULT / LOOP_CONTINUE / ESCALATE message formats. Wire S1 evaluation to S2 execution via structured JSON handoff.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">4</div>
+        <div class="phase-content">
+          <h4>Peer Channel — Telegram Group <span class="badge pending">PENDING</span></h4>
+          <p>Create dedicated Telegram group. All nodes + conductor are members. Add <code>peer_node.py</code>: sends/receives messages with TO/FROM/TYPE headers, parses routing, logs to Supabase. Human optionally lurks.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">5</div>
+        <div class="phase-content">
+          <h4>Conductor — Transport Layer <span class="badge pending">PENDING</span></h4>
+          <p>Add <code>conductor_node.py</code>: lightweight always-running process. Handles: standup cron, node registration registry, routing by header, dead-node detection, daily digest to Anton. No LLM at this layer.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">6</div>
+        <div class="phase-content">
+          <h4>Conductor — Reasoning Layer <span class="badge pending">PENDING</span></h4>
+          <p>Add on-demand Haiku/Claude Code session called by conductor for non-trivial decisions: task conflict, stuck resolution, priority re-ranking. Add <code>claimed_by</code> + <code>claimed_at</code> to personal_tasks. Implement full task assignment cycle.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-num">7</div>
+        <div class="phase-content">
+          <h4>Backpressure + AGENTS.md <span class="badge pending">PENDING</span></h4>
+          <p>Define AGENTS.md with approved action types, forbidden patterns, escalation triggers. Add CI-style check before each execution step. Hard stop if check fails. Conductor enforces globally across all nodes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. Risks -->
+  <section>
+    <h2><span class="num">08</span> Risks &amp; Mitigations</h2>
+    <table>
+      <tr>
+        <th>Risk</th>
+        <th>Impact</th>
+        <th>Mitigation</th>
+      </tr>
+      <tr>
+        <td>Infinite loop — agents loop without progress</td>
+        <td>Wasted tokens, blocked tasks</td>
+        <td>Failure budget (N=3). Stuck detection. Meta Loop resets perspective.</td>
+      </tr>
+      <tr>
+        <td>Context collapse (Karpathy effect)</td>
+        <td>Agent starts hallucinating / going in circles</td>
+        <td>Meta Loop: compress + reset at threshold</td>
+      </tr>
+      <tr>
+        <td>Agents pick same task</td>
+        <td>Duplicate work / conflicting writes</td>
+        <td><code>claimed_by</code> field in Supabase. Coordinator enforces.</td>
+      </tr>
+      <tr>
+        <td>Agent goes off-rails (unauthorized actions)</td>
+        <td>Unintended file edits / API calls</td>
+        <td>AGENTS.md CI check + permission_hook.py already in place</td>
+      </tr>
+      <tr>
+        <td>Peer channel noise</td>
+        <td>Too many messages, escalations</td>
+        <td>Escalation filter: human only sees decisions. Agents handle process.</td>
+      </tr>
+      <tr>
+        <td>Goal drift — agents optimize wrong metric</td>
+        <td>Work doesn't match actual priorities</td>
+        <td>Goals pulled from Supabase (source of truth) on every sync. Not from agent memory.</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- 9. Open questions -->
+  <section>
+    <h2><span class="num">09</span> Open Questions for Discussion</h2>
+    <div class="note">
+      <strong>Q1:</strong> Sync interval — 2h, 4h, or event-driven (trigger on task completion rather than time)?
+    </div>
+    <div class="note">
+      <strong>Q2:</strong> What's the right failure budget N? 3 feels right for code tasks but may be too low for research tasks.
+    </div>
+    <div class="note">
+      <strong>Q3:</strong> Should agents be allowed to assign tasks to each other, or only the coordinator can assign? (risk: agents game the system)
+    </div>
+    <div class="note">
+      <strong>Q4:</strong> Context reset threshold — token count, iteration count, or wall-clock time?
+    </div>
+    <div class="note">
+      <strong>Q5:</strong> Voice integration (GPT-4o-style) — eventual goal: agents speak to each other and to Anton via audio, not just text. What's the minimal version of this that's buildable locally?
+    </div>
+    <div class="note">
+      <strong>Q6:</strong> Conductor model choice — Haiku (cheap, fast) vs Claude Code session (full tools). Is routing logic complex enough to need full tool access, or is lightweight enough for Haiku?
+    </div>
+    <div class="note">
+      <strong>Q7:</strong> Can agents proactively message each other peer-to-peer (bypassing conductor), or must all communication route through the conductor? Peer-to-peer is faster but harder to audit.
+    </div>
+    <div class="note">
+      <strong>Q8:</strong> Should Anton's main Telegram chat be completely separate from the agent group, or should there be a way for Anton to "drop into" the agent channel when he wants to observe?
+    </div>
+  </section>
+
+  <div class="footer">
+    <span>Ralph Loop Design Spec · Axon · 2026-07-11</span>
+    <span>Status: DESIGN PHASE · Target: Aug 2026</span>
+  </div>
+
+</div>
+</body>
+</html>

@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 import urllib.request
+from datetime import datetime
 import urllib.error
 import urllib.parse
 from typing import Optional
@@ -38,7 +39,7 @@ _INSIGHT_RE = re.compile(
     re.DOTALL,
 )
 _DREAM_RE = re.compile(r'\[DREAM:\s*(.+?)\]', re.DOTALL)
-_ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM):[^\]]+\]', re.DOTALL)
+_ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|VALENCE|MOOD):[^\]]+\]', re.DOTALL)
 
 
 # ------------------------------------------------------------------
@@ -629,6 +630,54 @@ def fetch_relevant_rules(message_text: str) -> str:
     return "[Rules to follow for this message]\n" + "\n".join(f"- {r}" for r in matched) + "\n\n"
 
 
+def fetch_relevant_rule_names(message_text: str) -> str:
+    """
+    Keyword-match active rules against the incoming message.
+    Returns only rule names + short descriptions (anchors), not full content.
+    Claude fetches full protocol via the rules table when it needs to act.
+    """
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return ""
+    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&select=name,short_description,keywords,content"
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rules = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"Failed to fetch rules for anchor matching: {e}")
+        return ""
+
+    if not rules:
+        return ""
+
+    msg_lower = message_text.lower()
+    matched = []
+    for rule in rules:
+        keywords = [kw.strip() for kw in (rule.get("keywords") or "").split(",") if kw.strip()]
+        if not any(kw in msg_lower for kw in keywords):
+            continue
+        name = rule.get("name")
+        desc = rule.get("short_description", "")
+        if name:
+            # Named rule: emit anchor only
+            entry = f"- {name}" + (f": {desc}" if desc else "")
+        else:
+            # Unnamed rule: emit full content (these are typically short hard constraints)
+            entry = f"- {rule['content']}"
+        matched.append(entry)
+
+    if not matched:
+        return ""
+    return (
+        "[Rules to follow for this message — query the Supabase rules table WHERE name = '<rule_name>' to load full protocol before acting]\n"
+        + "\n".join(matched)
+        + "\n\n"
+    )
+
+
 def save_rule(content: str):
     """Insert a new rule and trigger embedding via the embed edge function. Non-blocking."""
     def _write():
@@ -670,6 +719,78 @@ def save_rule(content: str):
                 log.info(f"Rule saved and embedded: {content[:60]}")
         except Exception as e:
             log.warning(f"Rule embed failed: {e}")
+    threading.Thread(target=_write, daemon=True).start()
+
+
+def fetch_alive_state() -> dict | None:
+    """Fetch the single alive_state row. Returns dict or None if unavailable."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return None
+    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state?id=eq.1&limit=1"
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            rows = json.loads(resp.read().decode())
+            return rows[0] if rows else None
+    except Exception as e:
+        log.warning(f"fetch_alive_state failed: {e}")
+        return None
+
+
+def save_alive_state(
+    tick: int,
+    valence: float,
+    mood_label: str,
+    personality_note: str | None = None,
+    arousal: float = 0.0,
+    valence_sigma: float = 0.2,
+    arousal_sigma: float = 0.2,
+    curiosity_focus: str | None = None,
+    background_affect: float = 0.0,
+    tension: float = 0.0,
+) -> None:
+    """Upsert the alive_state row. Non-blocking."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return
+    payload: dict = {
+        "id": 1,
+        "tick": tick,
+        "valence": round(valence, 4),
+        "mood_label": mood_label,
+        "arousal": round(arousal, 4),
+        "valence_sigma": round(valence_sigma, 4),
+        "arousal_sigma": round(arousal_sigma, 4),
+        "background_affect": round(background_affect, 4),
+        "tension": round(tension, 4),
+        "last_updated": datetime.utcnow().isoformat() + "Z",
+    }
+    if personality_note is not None:
+        payload["personality_note"] = personality_note
+    if curiosity_focus is not None:
+        payload["curiosity_focus"] = curiosity_focus
+
+    def _write():
+        url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={
+                "apikey": config.SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8):
+                pass
+        except Exception as e:
+            log.warning(f"save_alive_state failed: {e}")
+
     threading.Thread(target=_write, daemon=True).start()
 
 

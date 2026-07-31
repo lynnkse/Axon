@@ -114,6 +114,44 @@ class SessionManagerNode:
         self._running = True
         self._reader_thread: Optional[threading.Thread] = None
 
+        # Alive state — loaded at startup, updated per message
+        self._alive_tick: int = 0
+        self._alive_valence: float = 0.0
+        self._alive_valence_sigma: float = 0.2
+        self._alive_arousal: float = 0.0
+        self._alive_arousal_sigma: float = 0.2
+        self._alive_mood: str = "neutral"
+        self._alive_personality: Optional[str] = None
+        self._alive_curiosity_focus: Optional[str] = None
+        self._alive_background_affect: float = 0.0
+        self._alive_tension: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Alive state helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _kalman_update(mu: float, sigma: float, delta: float, obs_sigma: float = 0.12) -> tuple[float, float]:
+        """Kalman update: prior N(mu, sigma^2) + observation (delta) with noise obs_sigma."""
+        k = sigma ** 2 / (sigma ** 2 + obs_sigma ** 2)
+        mu_new = max(-1.0, min(1.0, mu + k * delta))
+        sigma_new = max(0.05, ((1 - k) ** 0.5) * sigma)
+        return mu_new, sigma_new
+
+    def _save_full_alive_state(self):
+        supabase_client.save_alive_state(
+            tick=self._alive_tick,
+            valence=self._alive_valence,
+            mood_label=self._alive_mood,
+            personality_note=self._alive_personality,
+            arousal=self._alive_arousal,
+            valence_sigma=self._alive_valence_sigma,
+            arousal_sigma=self._alive_arousal_sigma,
+            curiosity_focus=self._alive_curiosity_focus,
+            background_affect=self._alive_background_affect,
+            tension=self._alive_tension,
+        )
+
     # ------------------------------------------------------------------
     # Config / system prompt
     # ------------------------------------------------------------------
@@ -134,6 +172,39 @@ class SessionManagerNode:
         if profile:
             parts.append(f"\nProfile:\n{profile}")
         if not config.SKIP_MEMORY_FETCH:
+            # Alive state — prepend creature context if available
+            alive = supabase_client.fetch_alive_state()
+            if alive:
+                self._alive_tick = alive.get("tick", 0)
+                self._alive_valence = alive.get("valence", 0.0)
+                self._alive_valence_sigma = alive.get("valence_sigma", 0.2)
+                self._alive_arousal = alive.get("arousal", 0.0)
+                self._alive_arousal_sigma = alive.get("arousal_sigma", 0.2)
+                self._alive_mood = alive.get("mood_label", "neutral")
+                self._alive_personality = alive.get("personality_note") or None
+                self._alive_curiosity_focus = alive.get("curiosity_focus") or None
+                self._alive_background_affect = alive.get("background_affect", 0.0)
+                self._alive_tension = alive.get("tension", 0.0)
+            alive_block = (
+                f"[ALIVE — tick {self._alive_tick}]\n"
+                f"Valence: {self._alive_valence:+.2f} (σ={self._alive_valence_sigma:.2f}) | "
+                f"Arousal: {self._alive_arousal:+.2f} (σ={self._alive_arousal_sigma:.2f}) | "
+                f"Mood: {self._alive_mood}\n"
+            )
+            if self._alive_curiosity_focus:
+                alive_block += f"CuriosityFocus: {self._alive_curiosity_focus}\n"
+            if abs(self._alive_background_affect) > 0.05:
+                alive_block += f"BackgroundAffect: {self._alive_background_affect:+.2f} | Tension: {self._alive_tension:.2f}\n"
+            if self._alive_personality:
+                alive_block += f"Personality: {self._alive_personality}\n"
+            alive_block += (
+                "Output [VALENCE: +X.XX] or [VALENCE: -X.XX] (max ±0.15 per message) to update emotional state when something meaningful happens. "
+                "Output [AROUSAL: +X.XX] or [AROUSAL: -X.XX] to update intensity/engagement level. "
+                "Output [MOOD: label] to update mood label. "
+                "Output [CURIOSITY: topic] to set current curiosity focus. "
+                "Output [TENSION: +X.XX] to adjust tension (unresolved threads, open questions)."
+            )
+            parts.append(alive_block)
             skills_index = supabase_client.fetch_skills_index()
             if skills_index:
                 parts.append(f"\n{skills_index}")
@@ -206,7 +277,7 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _spawn_claude(self):
-        cmd = [config.CLAUDE_PATH]
+        cmd = [config.CLAUDE_PATH, "--dangerously-skip-permissions"]
 
         existing_session = self._get_saved_session_id()
         self._spawn_time = time.time()
@@ -609,6 +680,15 @@ class SessionManagerNode:
                 channel=config.SESSION_CHANNEL,
             )
 
+            # Advance alive tick on every user message + entropy drift (σ grows without observations)
+            self._alive_tick += 1
+            self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
+            self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
+            # Slow decay of tension toward zero and background_affect toward zero
+            self._alive_tension = max(0.0, self._alive_tension - 0.01)
+            self._alive_background_affect *= 0.98
+            self._save_full_alive_state()
+
             # If we know the session file, record its current size so we only
             # read entries written AFTER this message. If session_id is unknown
             # (first exchange on a new session), pass None — _wait_for_jsonl_response
@@ -623,9 +703,11 @@ class SessionManagerNode:
                 session_file = None
                 initial_size = 0
 
-            # Prepend permanent rules (always) + keyword-matched rules.
+            # Prepend permanent rules (always) + keyword-matched rule anchors.
+            # Named rules emit name+description only; Claude fetches full protocol on demand.
+            # Unnamed rules (short hard constraints) are always emitted in full.
             permanent_rules = supabase_client.fetch_permanent_rules()
-            relevant_rules = supabase_client.fetch_relevant_rules(item.text)
+            relevant_rules = supabase_client.fetch_relevant_rule_names(item.text)
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
             message_text = (prefix + item.text) if prefix else item.text
 
@@ -683,6 +765,49 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _publish_response(self, item: QueueItem, response_text: str):
+        # Parse alive tags before stripping
+        import re as _re
+        _changed = False
+
+        _valence_m = _re.search(r'\[VALENCE:\s*([+-]?\d*\.?\d+)\]', response_text, _re.IGNORECASE)
+        if _valence_m:
+            delta = max(-0.15, min(0.15, float(_valence_m.group(1))))
+            self._alive_valence, self._alive_valence_sigma = self._kalman_update(
+                self._alive_valence, self._alive_valence_sigma, delta)
+            _changed = True
+
+        _arousal_m = _re.search(r'\[AROUSAL:\s*([+-]?\d*\.?\d+)\]', response_text, _re.IGNORECASE)
+        if _arousal_m:
+            delta = max(-0.15, min(0.15, float(_arousal_m.group(1))))
+            self._alive_arousal, self._alive_arousal_sigma = self._kalman_update(
+                self._alive_arousal, self._alive_arousal_sigma, delta)
+            _changed = True
+
+        _mood_m = _re.search(r'\[MOOD:\s*([^\]]+)\]', response_text, _re.IGNORECASE)
+        if _mood_m:
+            self._alive_mood = _mood_m.group(1).strip().lower()
+            _changed = True
+
+        _curiosity_m = _re.search(r'\[CURIOSITY:\s*([^\]]+)\]', response_text, _re.IGNORECASE)
+        if _curiosity_m:
+            self._alive_curiosity_focus = _curiosity_m.group(1).strip()
+            _changed = True
+
+        _tension_m = _re.search(r'\[TENSION:\s*([+-]?\d*\.?\d+)\]', response_text, _re.IGNORECASE)
+        if _tension_m:
+            delta = max(-0.2, min(0.2, float(_tension_m.group(1))))
+            self._alive_tension = max(0.0, min(1.0, self._alive_tension + delta))
+            _changed = True
+
+        if _changed:
+            self._save_full_alive_state()
+            log.info(
+                f"Alive state: tick={self._alive_tick} "
+                f"V={self._alive_valence:+.2f}(σ={self._alive_valence_sigma:.2f}) "
+                f"A={self._alive_arousal:+.2f}(σ={self._alive_arousal_sigma:.2f}) "
+                f"mood={self._alive_mood}"
+            )
+
         # Parse memory tags, save to Supabase, strip tags from delivered text
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
         supabase_client.save_message(

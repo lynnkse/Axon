@@ -191,12 +191,6 @@ def _try_once(request: dict) -> str | None:
 
 
 def main():
-    # Only intercept permissions for the relay's own Claude session.
-    # Other Claude Code sessions on this machine exit immediately so their
-    # normal TUI dialog is shown instead.
-    if not os.environ.get("CLAUDE_RELAY_SESSION"):
-        sys.exit(1)
-
     _log("=== permission_hook started ===")
 
     try:
