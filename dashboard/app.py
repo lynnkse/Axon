@@ -75,9 +75,23 @@ iframe { width: 100% !important; }
 
 st.markdown("##### ⚡ Axon Dashboard")
 
-tab_food, tab_fitness, tab_alive, tab_files, tab_split = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files", "⚡ Split View"]
+tab_food, tab_fitness, tab_alive, tab_files, tab_split, tab_manim = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files", "⚡ Split View", "🎬 Manim"]
 )
+
+MANIM_OUTPUT = Path.home() / "Axon/manim/output"
+MANIM_SCENES = Path.home() / "Axon/manim/scenes"
+MANIM_VIDEOS = Path.home() / "manim_videos"
+
+
+def _render_file(full_path: Path, height: int = 700):
+    """Render a single file inline."""
+    if full_path.suffix == ".html":
+        st.components.v1.html(full_path.read_text(encoding="utf-8", errors="replace"), height=height, scrolling=True)
+    elif full_path.suffix == ".pdf":
+        st.download_button("⬇ Download PDF", full_path.read_bytes(), file_name=full_path.name, mime="application/pdf")
+    elif full_path.suffix in (".mp4", ".webm", ".mov"):
+        st.video(str(full_path))
 
 # ── Tab: Food Today ───────────────────────────────────────────────────────────
 with tab_food:
@@ -205,33 +219,41 @@ with tab_alive:
 # ── Tab: File Viewer ──────────────────────────────────────────────────────────
 with tab_files:
     st.subheader("File Viewer")
-    html_files = sorted(DOCS_DIR.glob("**/*.html"))
-    pdf_files = sorted(DOCS_DIR.glob("**/*.pdf"))
-    all_files = html_files + pdf_files
-
+    all_files = (
+        sorted(DOCS_DIR.glob("**/*.html")) +
+        sorted(DOCS_DIR.glob("**/*.pdf")) +
+        sorted(MANIM_OUTPUT.glob("*.mp4"))
+    )
     if all_files:
-        selected = st.selectbox("Choose file", [str(f.relative_to(DOCS_DIR)) for f in all_files])
-        full_path = DOCS_DIR / selected
-        if full_path.suffix == ".html":
-            content = full_path.read_text(encoding="utf-8", errors="replace")
-            st.components.v1.html(content, height=700, scrolling=True)
-        elif full_path.suffix == ".pdf":
-            data = full_path.read_bytes()
-            st.download_button("⬇ Download PDF", data, file_name=full_path.name, mime="application/pdf")
+        def _label(f):
+            try:
+                return str(f.relative_to(DOCS_DIR))
+            except ValueError:
+                return f"manim/{f.name}"
+        labels = [_label(f) for f in all_files]
+        selected = st.selectbox("Choose file", labels)
+        _render_file(all_files[labels.index(selected)])
     else:
-        st.info("No HTML or PDF files found in ~/Axon/")
+        st.info("No files found in ~/Axon/")
 
 # ── Tab: Split View ───────────────────────────────────────────────────────────
 with tab_split:
     TAILSCALE_IP = "100.73.56.102"
     PANE_H = 820
 
-    html_files_s = sorted(DOCS_DIR.glob("**/*.html"))
-    pdf_files_s  = sorted(DOCS_DIR.glob("**/*.pdf"))
-    all_files_s  = html_files_s + pdf_files_s
-    file_names_s = [str(f.relative_to(DOCS_DIR)) for f in all_files_s]
+    all_files_s = (
+        sorted(DOCS_DIR.glob("**/*.html")) +
+        sorted(DOCS_DIR.glob("**/*.pdf")) +
+        sorted(MANIM_OUTPUT.glob("*.mp4"))
+    )
+    def _slabel(f):
+        try:
+            return str(f.relative_to(DOCS_DIR))
+        except ValueError:
+            return f"manim/{f.name}"
+    file_names_s = [_slabel(f) for f in all_files_s] or ["(none)"]
 
-    selected_s = st.selectbox("", file_names_s if file_names_s else ["(none)"], key="split_file", label_visibility="collapsed")
+    selected_s = st.selectbox("", file_names_s, key="split_file", label_visibility="collapsed")
 
     col_cli, col_viewer = st.columns(2, gap="small")
 
@@ -241,13 +263,46 @@ with tab_split:
 
     with col_viewer:
         st.markdown('<p class="split-label">File viewer</p>', unsafe_allow_html=True)
-        if file_names_s and selected_s != "(none)":
-            full_path_s = DOCS_DIR / selected_s
-            if full_path_s.suffix == ".html":
-                content_s = full_path_s.read_text(encoding="utf-8", errors="replace")
-                st.components.v1.html(content_s, height=PANE_H, scrolling=True)
-            elif full_path_s.suffix == ".pdf":
-                data_s = full_path_s.read_bytes()
-                st.download_button("⬇ Download PDF", data_s, file_name=full_path_s.name, mime="application/pdf")
+        if all_files_s and selected_s != "(none)":
+            _render_file(all_files_s[file_names_s.index(selected_s)], height=PANE_H)
         else:
             st.info("No files found in ~/Axon/")
+
+# ── Tab: Manim ────────────────────────────────────────────────────────────────
+with tab_manim:
+    st.subheader("🎬 Manim — Math Visualizations")
+
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.markdown("**Rendered clips**")
+        mp4s = sorted(MANIM_OUTPUT.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if mp4s:
+            chosen = st.radio("", [f.stem for f in mp4s], key="manim_pick", label_visibility="collapsed")
+            chosen_path = MANIM_OUTPUT / f"{chosen}.mp4"
+        else:
+            st.info("No renders yet.")
+            chosen_path = None
+
+        st.markdown("---")
+        st.markdown("**3b1b scene library**")
+        year_dirs = sorted([d for d in MANIM_VIDEOS.iterdir() if d.is_dir() and d.name.startswith("_")], reverse=True) if MANIM_VIDEOS.exists() else []
+        if year_dirs:
+            year = st.selectbox("Year", [d.name for d in year_dirs], key="manim_year")
+            topic_dirs = sorted((MANIM_VIDEOS / year).iterdir())
+            topic = st.selectbox("Topic", [d.name for d in topic_dirs], key="manim_topic")
+            scene_files = sorted((MANIM_VIDEOS / year / topic).glob("*.py"))
+            if scene_files:
+                scene_file = st.selectbox("File", [f.name for f in scene_files], key="manim_file")
+                st.code(f"render.sh {year}/{topic}/{scene_file} <SceneName>", language="bash")
+            else:
+                st.info("No .py files in this topic.")
+        else:
+            st.info("3b1b videos repo not found at ~/manim_videos")
+
+    with col_right:
+        if chosen_path and chosen_path.exists():
+            st.markdown(f"**{chosen_path.stem}**")
+            st.video(str(chosen_path))
+        else:
+            st.info("Select a clip on the left to play it here.")

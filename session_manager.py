@@ -223,7 +223,14 @@ class SessionManagerNode:
                 "[INSIGHT: content | PROJECT: project_name | TYPE: architecture|failure_mode|performance|stability|design|procedure|warning|pattern | CONFIDENCE: 1-5]\n"
                 "Use INSIGHT for professional/technical observations: system architecture patterns, failure modes, "
                 "performance characteristics, mathematical stability edge cases, design tradeoffs. "
-                "PROJECT is optional (omit for cross-project insights). CONFIDENCE: 1=hypothesis, 3=observed, 5=battle-tested."
+                "PROJECT is optional (omit for cross-project insights). CONFIDENCE: 1=hypothesis, 3=observed, 5=battle-tested.\n\n"
+                "SKILL BUILDING (proactive — do not wait for the user to ask): After completing any non-trivial task, "
+                "ask yourself: 'Would I do this differently next time? Is there a reusable workflow here?' "
+                "If yes, emit:\n"
+                "[SKILL: name=<kebab-case-name> | keywords=<kw1,kw2,kw3> | desc=<one sentence, max 100 chars> | <full procedure — steps, flags, gotchas>]\n"
+                "Examples of when to emit SKILL: learned the right CLI flags for a tool, discovered a non-obvious "
+                "sequence of steps, hit a failure mode and found the fix, built something reusable. "
+                "Skills are stored in the rules table and surfaced automatically in future sessions when keywords match."
             )
         return "\n".join(parts)
 
@@ -708,6 +715,14 @@ class SessionManagerNode:
             # Unnamed rules (short hard constraints) are always emitted in full.
             permanent_rules = supabase_client.fetch_permanent_rules()
             relevant_rules = supabase_client.fetch_relevant_rule_names(item.text)
+
+            # Bump usage counters for any named rules that fired
+            if relevant_rules:
+                import re as _re
+                fired_names = _re.findall(r'^- ([\w_-]+)', relevant_rules, _re.MULTILINE)
+                if fired_names:
+                    supabase_client.bump_rule_usage(fired_names)
+
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
             message_text = (prefix + item.text) if prefix else item.text
 

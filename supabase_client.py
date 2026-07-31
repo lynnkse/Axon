@@ -39,7 +39,11 @@ _INSIGHT_RE = re.compile(
     re.DOTALL,
 )
 _DREAM_RE = re.compile(r'\[DREAM:\s*(.+?)\]', re.DOTALL)
-_ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|VALENCE|MOOD):[^\]]+\]', re.DOTALL)
+_SKILL_RE = re.compile(
+    r'\[SKILL:\s*name=([^\|]+)\s*\|\s*keywords=([^\|]+)\s*\|\s*desc=([^\|]+)\s*\|\s*(.+?)\]',
+    re.DOTALL,
+)
+_ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|SKILL|VALENCE|MOOD):[^\]]+\]', re.DOTALL)
 
 
 # ------------------------------------------------------------------
@@ -722,6 +726,47 @@ def save_rule(content: str):
     threading.Thread(target=_write, daemon=True).start()
 
 
+def save_skill(name: str, keywords: str, short_description: str, content: str):
+    """Insert a new agent-created skill into the rules table. Non-blocking."""
+    def _write():
+        payload = {
+            "name": name.strip(),
+            "keywords": keywords.strip(),
+            "short_description": short_description.strip()[:120],
+            "content": content.strip(),
+            "active": True,
+            "created_by": "agent",
+        }
+        ok = _rest_insert("rules", payload)
+        if ok:
+            log.info(f"Skill saved: {name}")
+    threading.Thread(target=_write, daemon=True).start()
+
+
+def bump_rule_usage(names: list[str]):
+    """Increment use_count and set last_used=now for named rules via RPC. Non-blocking."""
+    if not names:
+        return
+    def _write():
+        rpc_url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rpc/increment_rule_usage"
+        for name in names:
+            data = json.dumps({"rule_name": name}).encode()
+            req = urllib.request.Request(
+                rpc_url, data=data, method="POST",
+                headers={
+                    "apikey": config.SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5):
+                    log.debug(f"Bumped rule usage: {name}")
+            except Exception as e:
+                log.debug(f"bump_rule_usage failed for {name!r}: {e}")
+    threading.Thread(target=_write, daemon=True).start()
+
+
 def fetch_alive_state() -> dict | None:
     """Fetch the single alive_state row. Returns dict or None if unavailable."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
@@ -902,6 +947,13 @@ def process_response(text: str, channel: str = "telegram") -> str:
         if dream_content:
             log.info(f"Dream captured: {dream_content[:60]}")
             save_dream(dream_content, [])
+
+    skills = _SKILL_RE.findall(text)
+    for name, keywords, desc, content in skills:
+        name = name.strip()
+        if name:
+            log.info(f"Skill captured: {name}")
+            save_skill(name=name, keywords=keywords, short_description=desc, content=content)
 
     # Strip all tags from delivered text
     cleaned = _ALL_TAGS_RE.sub("", text).strip()
