@@ -241,32 +241,25 @@ with tab_split:
     TAILSCALE_IP = "100.73.56.102"
     PANE_H = 820
 
-    all_files_s = (
-        sorted(DOCS_DIR.glob("**/*.html")) +
-        sorted(DOCS_DIR.glob("**/*.pdf")) +
-        sorted(MANIM_OUTPUT.glob("*.mp4"))
-    )
-    def _slabel(f):
-        try:
-            return str(f.relative_to(DOCS_DIR))
-        except ValueError:
-            return f"manim/{f.name}"
-    file_names_s = [_slabel(f) for f in all_files_s] or ["(none)"]
+    # Left pane selector
+    LEFT_OPTIONS = {"CLI (manager/cli)": 7681, "RALPH": 7682}
+    RIGHT_OPTIONS = {"RALPH": 7682, "CLI (manager/cli)": 7681}
 
-    selected_s = st.selectbox("", file_names_s, key="split_file", label_visibility="collapsed")
+    ctrl_l, ctrl_r = st.columns(2, gap="small")
+    with ctrl_l:
+        left_choice = st.selectbox("Left pane", list(LEFT_OPTIONS.keys()), key="split_left", label_visibility="collapsed")
+    with ctrl_r:
+        right_choice = st.selectbox("Right pane", list(RIGHT_OPTIONS.keys()), key="split_right", label_visibility="collapsed")
 
     col_cli, col_viewer = st.columns(2, gap="small")
 
     with col_cli:
-        st.markdown('<p class="split-label">CLI</p>', unsafe_allow_html=True)
-        st.components.v1.iframe(f"http://{TAILSCALE_IP}:7681", height=PANE_H, scrolling=False)
+        st.markdown(f'<p class="split-label">{left_choice}</p>', unsafe_allow_html=True)
+        st.components.v1.iframe(f"http://{TAILSCALE_IP}:{LEFT_OPTIONS[left_choice]}", height=PANE_H, scrolling=False)
 
     with col_viewer:
-        st.markdown('<p class="split-label">File viewer</p>', unsafe_allow_html=True)
-        if all_files_s and selected_s != "(none)":
-            _render_file(all_files_s[file_names_s.index(selected_s)], height=PANE_H)
-        else:
-            st.info("No files found in ~/Axon/")
+        st.markdown(f'<p class="split-label">{right_choice}</p>', unsafe_allow_html=True)
+        st.components.v1.iframe(f"http://{TAILSCALE_IP}:{RIGHT_OPTIONS[right_choice]}", height=PANE_H, scrolling=False)
 
 # ── Tab: Manim ────────────────────────────────────────────────────────────────
 with tab_manim:
