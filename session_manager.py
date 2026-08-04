@@ -289,6 +289,26 @@ class SessionManagerNode:
         existing_session = self._get_saved_session_id()
         self._spawn_time = time.time()
         if existing_session:
+            # Don't resume sessions that have grown too large — they cause
+            # Claude to crash-loop on every restart as it tries to reload
+            # the full history. 20MB is a safe ceiling.
+            session_path = self._get_session_file_path(existing_session)
+            try:
+                session_size = session_path.stat().st_size
+            except Exception:
+                session_size = 0
+            if session_size > 20 * 1024 * 1024:
+                log.warning(
+                    f"Session {existing_session[:8]} is {session_size/1024/1024:.1f}MB "
+                    f"— too large to resume safely, starting fresh"
+                )
+                try:
+                    Path(config.SESSION_ID_FILE).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                existing_session = None
+
+        if existing_session:
             cmd += ["--resume", existing_session]
             self.current_session_id = existing_session
             log.info(f"Resuming session: {existing_session[:8]}...")

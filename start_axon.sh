@@ -49,23 +49,23 @@ start_in_session() {
 
 # ── 1. manager — session manager / brain ─────────────────────────────────────
 start_in_session manager \
-    "cd '$AXON_DIR' && $PYTHON session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+    "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
 
 # ── 2. telegram — Telegram gateway ───────────────────────────────────────────
 start_in_session telegram \
-    "cd '$AXON_DIR' && $PYTHON telegram_node.py 2>&1 | tee '$LOG_DIR/telegram.log'"
+    "cd '$AXON_DIR' && $PYTHON -u telegram_node.py 2>&1 | tee '$LOG_DIR/telegram.log'"
 
 # ── 3. cli — CLI node (also streamed via ttyd to browser) ────────────────────
 start_in_session cli \
-    "cd '$AXON_DIR' && $PYTHON cli_node.py 2>&1 | tee '$LOG_DIR/cli.log'"
+    "cd '$AXON_DIR' && $PYTHON -u cli_node.py 2>&1 | tee '$LOG_DIR/cli.log'"
 
 # ── 4. curator — daily knowledge maintenance ──────────────────────────────────
 start_in_session curator \
-    "cd '$AXON_DIR' && $PYTHON curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
+    "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
 
 # ── 5. ralph — autonomous execution agent ─────────────────────────────────────
 start_in_session ralph \
-    "cd '$AXON_DIR' && $PYTHON ralph_node.py 2>&1 | tee '$LOG_DIR/ralph.log'"
+    "cd '$AXON_DIR' && $PYTHON -u ralph_node.py 2>&1 | tee '$LOG_DIR/ralph.log'"
 
 # ── 6. web — Streamlit dashboard + ttyd CLI stream ───────────────────────────
 # Both background processes are managed here; pane shows their combined status.

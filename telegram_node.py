@@ -63,8 +63,11 @@ _TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-Z]|\x1b[=>]")
+
 
 def _strip_memory_tags(text: str) -> str:
+    text = _ANSI_RE.sub("", text)
     return _TAG_RE.sub("", text).strip()
 
 
@@ -112,26 +115,40 @@ async def _transcribe_groq(audio_bytes: bytes) -> str:
         log.warning("GROQ_API_KEY not set")
         return ""
     try:
-        import tempfile, asyncio, os
-        # Convert OGA/OGG/Opus to mp3 via ffmpeg for reliable Groq compatibility
+        import os
+        from groq import AsyncGroq
+        client = AsyncGroq(api_key=groq_key)
+
+        # Try 1: send OGG directly — Groq natively supports ogg/opus
+        try:
+            result = await client.audio.transcriptions.create(
+                file=("voice.ogg", audio_bytes, "audio/ogg"),
+                model="whisper-large-v3-turbo",
+            )
+            return result.text.strip()
+        except Exception as e1:
+            log.warning(f"Groq direct OGG failed ({e1}), retrying with ffmpeg→mp3")
+
+        # Try 2: convert to mp3 via ffmpeg and retry
+        import tempfile, asyncio
         with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as src_f:
             src_f.write(audio_bytes)
             src_path = src_f.name
         mp3_path = src_path.replace(".oga", ".mp3")
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", "-b:a", "64k", mp3_path,
+            "ffmpeg", "-y", "-i", src_path,
+            "-ar", "16000", "-ac", "1", "-b:a", "128k", mp3_path,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
         )
         _, stderr = await proc.communicate()
+        os.unlink(src_path)
         if proc.returncode != 0 or not os.path.exists(mp3_path):
             log.error(f"ffmpeg failed (rc={proc.returncode}): {stderr.decode()[-300:]}")
-            os.unlink(src_path)
             return ""
         with open(mp3_path, "rb") as mp3_f:
             mp3_bytes = mp3_f.read()
-        os.unlink(src_path); os.unlink(mp3_path)
-        from groq import AsyncGroq
-        client = AsyncGroq(api_key=groq_key)
+        os.unlink(mp3_path)
+        log.info(f"Sending mp3 to Groq: {len(mp3_bytes)} bytes")
         result = await client.audio.transcriptions.create(
             file=("voice.mp3", mp3_bytes, "audio/mpeg"),
             model="whisper-large-v3-turbo",
@@ -218,6 +235,14 @@ class ResponseSubscriber:
                                 self._loop.call_soon_threadsafe(
                                     self._proactive_queue.put_nowait, msg
                                 )
+                            elif msg.get("source") == "ralph":
+                                # RALPH's internal iteration exchanges aren't replies to any
+                                # pending Telegram request -- routing them into the plain
+                                # response queue let them sit there and get incorrectly
+                                # delivered as the reply to a later, unrelated Telegram
+                                # message. Visibility into RALPH stays via the RALPH tmux
+                                # pane / dashboard split view only.
+                                pass
                             else:
                                 self._loop.call_soon_threadsafe(
                                     self._response_queue.put_nowait, msg
@@ -316,7 +341,17 @@ async def _wait_for_response(
     source: str,
     activity_event: Optional[asyncio.Event] = None,
 ) -> str:
-    """Wait for next response from SessionManager with matching source."""
+    """Wait for next response from SessionManager with matching source.
+
+    The response queue is a catch-all for anything not routed to a dedicated
+    queue (confirm/permission/tui/proactive/ralph) -- notably any message with
+    a source outside those tags (e.g. "unknown" from a client that didn't set
+    one) lands here too. Previously this function returned whatever came off
+    the queue next with no source check at all, despite the docstring's claim
+    -- a stray message from any such origin would get delivered as the reply
+    to an unrelated pending Telegram request. Now it discards non-matching
+    messages instead of returning them.
+    """
     deadline = asyncio.get_event_loop().time() + _RESPONSE_TIMEOUT
     while True:
         remaining = deadline - asyncio.get_event_loop().time()
@@ -329,6 +364,13 @@ async def _wait_for_response(
         if msg.get("type") == "activity":
             if activity_event and msg.get("growing"):
                 activity_event.set()
+            continue
+        msg_source = msg.get("source")
+        if msg_source != source:
+            log.warning(
+                f"_wait_for_response: discarding mismatched message "
+                f"(expected source={source!r}, got {msg_source!r}): {msg.get('text', '')[:80]!r}"
+            )
             continue
         return msg.get("text", "")
 
@@ -430,13 +472,6 @@ async def _handle_and_reply(
     for chunk in _split_message(clean):
         await update.effective_message.reply_text(chunk)
 
-    # Cleanup downloaded media
-    if media_path:
-        try:
-            os.unlink(media_path)
-        except Exception:
-            pass
-
 
 # ── Permission request handling ───────────────────────────────────────────────
 
@@ -505,6 +540,14 @@ async def _tui_dispatcher(
             )
         except Exception as e:
             log.error(f"Failed to send TUI prompt to Telegram: {e}")
+            try:
+                await bot.send_message(
+                    chat_id=authorized_user_id,
+                    text=text,
+                    reply_markup=keyboard,
+                )
+            except Exception as e2:
+                log.error(f"TUI prompt plain-text fallback also failed: {e2}")
 
 
 _SILENT_TOKEN = "[SILENT]"
@@ -783,7 +826,19 @@ def _make_handlers(subscriber: ResponseSubscriber):
 
         await update.message.reply_chat_action("typing")
         try:
-            tg_file = await voice.get_file()
+            tg_file = None
+            last_err = None
+            for attempt in range(3):
+                try:
+                    tg_file = await voice.get_file()
+                    break
+                except Exception as e:
+                    last_err = e
+                    log.warning(f"voice.get_file() attempt {attempt + 1}/3 failed: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+            if tg_file is None:
+                raise last_err
             import httpx
             async with httpx.AsyncClient(timeout=30) as dl_client:
                 resp = await dl_client.get(tg_file.file_path)

@@ -33,7 +33,7 @@ if [ -f "$TTYD" ]; then
     --port 7681 \
     --interface 0.0.0.0 \
     --writable \
-    tmux attach-session -t cli \
+    /usr/bin/tmux attach-session -t cli \
     > "$LOG_DIR/ttyd.log" 2>&1 &
   echo "CLI stream started (PID $!) → http://localhost:7681"
 else

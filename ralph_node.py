@@ -292,6 +292,10 @@ def run_loop(task: dict, supervised: bool = False,
     prev_summary = ""
     mode_tag = "SUPERVISED" if supervised else "AUTO"
 
+    print(f"\n{'═'*60}")
+    print(f"  RALPH LOOP START  [{mode_tag}]")
+    print(f"  Task: {title}")
+    print(f"{'═'*60}")
     log.info(f"RALPH loop start [{mode_tag}]: {title!r} (id={task_id})")
     _tg_notify(
         f"🔁 *RALPH starting* `[{mode_tag}]`\n"
@@ -303,6 +307,9 @@ def run_loop(task: dict, supervised: bool = False,
         _mark_task(task_id, "in_progress")
 
     for n in range(1, MAX_ITERATIONS + 1):
+        print(f"\n{'─'*60}")
+        print(f"  RALPH  iteration {n}/{MAX_ITERATIONS}")
+        print(f"{'─'*60}")
         log.info(f"Iteration {n}/{MAX_ITERATIONS}")
 
         prompt = _build_prompt(title, notes, n, prev_summary, supervised=supervised)
@@ -318,32 +325,42 @@ def run_loop(task: dict, supervised: bool = False,
 
         time.sleep(0.2)
 
+        print(f"  → sending task to Claude (session_manager)...")
         if not _send_to_session(prompt):
+            print(f"  ✗ could not reach session_manager")
             _tg_notify(f"❌ RALPH: failed to reach session manager on iteration {n}")
             return
 
+        print(f"  ↻ waiting for Claude's response...")
         try:
             response = response_q.get(timeout=ITERATION_TIMEOUT + 30)
         except queue.Empty:
             response = None
 
         if not response:
+            print(f"  ✗ no response received (timeout)")
             _tg_notify(f"⏱ RALPH: no response in iteration {n} — stopping")
             log.warning("No response received")
             return
 
+        preview = response[:300].replace('\n', ' ')
+        print(f"  ← Claude responded: {preview}{'...' if len(response) > 300 else ''}")
+
         prev_summary = response[-600:] if len(response) > 600 else response
 
         v = _parse_verdict(response)
+        print(f"\n  evaluating verdict...")
         log.info(f"Verdict: {v.kind!r} reason={v.reason!r}")
 
         if v.kind == "DONE":
+            print(f"  ✓ verdict: DONE — task complete after {n} iteration(s)")
             _tg_notify(f"✅ *RALPH: DONE* after {n} iteration(s)\nTask: {title}")
             if task_id:
                 _mark_task(task_id, "done")
             return
 
         if v.kind == "STUCK":
+            print(f"  ✗ verdict: STUCK — {v.reason}")
             _tg_notify(
                 f"🚧 *RALPH: STUCK* after {n} iteration(s)\n"
                 f"Task: {title}\n"
@@ -379,6 +396,7 @@ def run_loop(task: dict, supervised: bool = False,
             continue
 
         # CONTINUE (autonomous mode) — next iteration
+        print(f"  → verdict: CONTINUE — moving to iteration {n+1}")
         time.sleep(1)
 
     _tg_notify(
