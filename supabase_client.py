@@ -40,7 +40,11 @@ _INSIGHT_RE = re.compile(
 )
 _DREAM_RE = re.compile(r'\[DREAM:\s*(.+?)\]', re.DOTALL)
 _SKILL_RE = re.compile(
-    r'\[SKILL:\s*name=([^\|]+)\s*\|\s*keywords=([^\|]+)\s*\|\s*desc=([^\|]+)\s*\|\s*(.+?)\]',
+    # name= must look like a real kebab-case identifier, not placeholder text
+    # like "<kebab-case-name>" or "..." -- this is what stops the regex from
+    # matching when someone quotes the tag syntax as a literal example
+    # (e.g. in backticks) instead of actually emitting a real tag.
+    r'\[SKILL:\s*name=([a-z0-9][a-z0-9-]*)\s*\|\s*keywords=([^\|]+)\s*\|\s*desc=([^\|]+)\s*\|\s*(.+?)\]',
     re.DOTALL,
 )
 _ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|SKILL|VALENCE|MOOD):[^\]]+\]', re.DOTALL)
