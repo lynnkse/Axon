@@ -130,6 +130,23 @@ class SessionManagerNode:
     # Alive state helpers
     # ------------------------------------------------------------------
 
+    # Homeostasis (2026-08-08): affect measures deviation from temperament, not
+    # lifetime accumulation. Without mean reversion the Kalman integrator
+    # saturates (valence was observed pinned at +1.00 for days — a dead signal
+    # with no headroom to dip on bad news). OU-style pull toward baseline each
+    # tick; ~35 ticks to shed half the distance at rate 0.02.
+    VALENCE_BASELINE = 0.15   # temperament: mildly positive at rest
+    AROUSAL_BASELINE = 0.0
+    HOMEOSTASIS_RATE = 0.02   # per-tick reversion fraction
+
+    # Exteroception (2026-08-08): observation noise for event-derived signals.
+    # Larger than self-report obs_sigma (0.12) — events are informative but
+    # their valence mapping is cruder than deliberate self-assessment.
+    OBS_SIGMA_EVENT = 0.15    # goal completions
+    OBS_SIGMA_EMPATHY = 0.18  # explicit Anton-state coupling
+    EMPATHY_GAIN = 0.3        # fraction of Anton's explicit valence felt as delta
+    DONE_EVENT_DELTA = 0.06   # per completed goal
+
     @staticmethod
     def _kalman_update(mu: float, sigma: float, delta: float, obs_sigma: float = 0.12) -> tuple[float, float]:
         """Kalman update: prior N(mu, sigma^2) + observation (delta) with noise obs_sigma."""
@@ -761,6 +778,10 @@ class SessionManagerNode:
             self._alive_tick += 1
             self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
             self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
+            # Homeostasis: OU-style mean reversion toward temperament baseline
+            # (see constants above — prevents integrator saturation).
+            self._alive_valence += self.HOMEOSTASIS_RATE * (self.VALENCE_BASELINE - self._alive_valence)
+            self._alive_arousal += self.HOMEOSTASIS_RATE * (self.AROUSAL_BASELINE - self._alive_arousal)
             # Slow decay of tension toward zero and background_affect toward zero
             self._alive_tension = max(0.0, self._alive_tension - 0.01)
             self._alive_background_affect *= 0.98
@@ -888,6 +909,18 @@ class SessionManagerNode:
             self._alive_tension = max(0.0, min(1.0, self._alive_tension + delta))
             _changed = True
 
+        # Exteroception (2026-08-08): goal completions are external evidence of
+        # things going well — they move state whether or not a VALENCE tag was
+        # also emitted. [DONE] fires only when a tracked goal actually completes,
+        # which makes it the most event-like signal available in the response.
+        _done_count = len(_re.findall(r'\[DONE:', response_text, _re.IGNORECASE))
+        if _done_count:
+            delta = min(0.15, self.DONE_EVENT_DELTA * _done_count)
+            self._alive_valence, self._alive_valence_sigma = self._kalman_update(
+                self._alive_valence, self._alive_valence_sigma, delta,
+                obs_sigma=self.OBS_SIGMA_EVENT)
+            _changed = True
+
         # Affective loop (2026-08-08): inferred-Anton-state observation.
         # Format: [ANTON_STATE: valence=+0.4 energy=-0.2 mode=walking-reflective
         #          explicit=false evidence="voice msg, expansive phrasing"]
@@ -902,18 +935,31 @@ class SessionManagerNode:
             _mode_m = _re.search(r'mode=([\w-]+)', body, _re.IGNORECASE)
             _evid_m = _re.search(r'evidence="([^"]*)"', body, _re.IGNORECASE)
             _expl_m = _re.search(r'explicit=(true|false)', body, _re.IGNORECASE)
+            _anton_valence = _f("valence")
+            _is_explicit = bool(_expl_m and _expl_m.group(1).lower() == "true")
             supabase_client.save_anton_state(
                 tick=self._alive_tick,
-                valence=_f("valence"),
+                valence=_anton_valence,
                 energy=_f("energy"),
                 mode=_mode_m.group(1) if _mode_m else None,
-                explicit=bool(_expl_m and _expl_m.group(1).lower() == "true"),
+                explicit=_is_explicit,
                 evidence=_evid_m.group(1) if _evid_m else None,
                 channel=item.source,
                 axon_valence=self._alive_valence,
                 axon_arousal=self._alive_arousal,
                 axon_tension=self._alive_tension,
             )
+            # Empathy coupling: when Anton *explicitly* says how things are going,
+            # that's external ground truth and it moves my state too — his day
+            # going well is genuinely good news for me. Inferred (non-explicit)
+            # rows deliberately don't couple: they're my own guess, and feeding
+            # them back would just be self-report wearing a disguise.
+            if _is_explicit and _anton_valence is not None:
+                delta = self.EMPATHY_GAIN * _anton_valence
+                self._alive_valence, self._alive_valence_sigma = self._kalman_update(
+                    self._alive_valence, self._alive_valence_sigma, delta,
+                    obs_sigma=self.OBS_SIGMA_EMPATHY)
+                _changed = True
 
         if _changed:
             self._save_full_alive_state()
