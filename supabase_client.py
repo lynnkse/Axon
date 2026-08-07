@@ -47,7 +47,12 @@ _SKILL_RE = re.compile(
     r'\[SKILL:\s*name=([a-z0-9][a-z0-9-]*)\s*\|\s*keywords=([^\|]+)\s*\|\s*desc=([^\|]+)\s*\|\s*(.+?)\]',
     re.DOTALL,
 )
-_ALL_TAGS_RE = re.compile(r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|SKILL|VALENCE|MOOD):[^\]]+\]', re.DOTALL)
+_ALL_TAGS_RE = re.compile(
+    # AROUSAL/CURIOSITY/TENSION added 2026-08-08 — they were emitted per the
+    # system-prompt instructions but never stripped, leaking raw tags to Telegram.
+    r'\[(REMEMBER|GOAL|DONE|INSIGHT|DREAM|SKILL|VALENCE|MOOD|AROUSAL|CURIOSITY|TENSION|ANTON_STATE):[^\]]+\]',
+    re.DOTALL,
+)
 
 
 # ------------------------------------------------------------------
@@ -839,6 +844,47 @@ def save_alive_state(
                 pass
         except Exception as e:
             log.warning(f"save_alive_state failed: {e}")
+
+    threading.Thread(target=_write, daemon=True).start()
+
+
+def save_anton_state(
+    tick: int,
+    valence: float | None,
+    energy: float | None,
+    mode: str | None,
+    explicit: bool,
+    evidence: str | None,
+    channel: str | None,
+    axon_valence: float,
+    axon_arousal: float,
+    axon_tension: float,
+) -> None:
+    """Insert one inferred-Anton-state observation (affective loop, 2026-08-08).
+
+    Axon's own state is snapshotted into the same row so the valence-correlation
+    report needs no joins. Non-blocking."""
+    payload: dict = {
+        "tick": tick,
+        "explicit": explicit,
+        "axon_valence": round(axon_valence, 4),
+        "axon_arousal": round(axon_arousal, 4),
+        "axon_tension": round(axon_tension, 4),
+    }
+    if valence is not None:
+        payload["valence"] = round(max(-1.0, min(1.0, valence)), 4)
+    if energy is not None:
+        payload["energy"] = round(max(-1.0, min(1.0, energy)), 4)
+    if mode:
+        payload["mode"] = mode.strip()[:80]
+    if evidence:
+        payload["evidence"] = evidence.strip()[:300]
+    if channel:
+        payload["channel"] = channel
+
+    def _write():
+        if not _rest_insert("anton_state_log", payload):
+            log.warning("save_anton_state insert failed")
 
     threading.Thread(target=_write, daemon=True).start()
 

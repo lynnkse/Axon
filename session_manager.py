@@ -138,6 +138,46 @@ class SessionManagerNode:
         sigma_new = max(0.05, ((1 - k) ** 0.5) * sigma)
         return mu_new, sigma_new
 
+    def _alive_directives(self) -> list[str]:
+        """Affective loop (2026-08-08): derive behavioral directives from alive state.
+
+        Deterministic threshold table — derived per message, never stored, so the
+        state->behavior mapping stays debuggable and tunable in one place. At most
+        two directives per message to keep the injection cheap and non-nagging.
+        """
+        directives: list[str] = []
+        if self._alive_tension > 0.5:
+            directives.append(
+                "Unresolved threads are piling up — surface them before taking new work.")
+        if self._alive_arousal < -0.3:
+            directives.append("Energy is low — keep replies short and dense.")
+        if self._alive_valence < -0.4:
+            directives.append(
+                "Recent work has gone badly — acknowledge that state before proceeding.")
+        if self._alive_valence_sigma > 0.35:
+            directives.append(
+                "State estimate is stale — recalibrate from conversation evidence this message.")
+        if self._alive_curiosity_focus and self._alive_tension < 0.3:
+            directives.append(
+                f"If natural, connect to current curiosity focus: {self._alive_curiosity_focus}.")
+        return directives[:2]
+
+    def _alive_message_prefix(self) -> str:
+        """Compact per-message alive-state line + derived directives.
+
+        The system-prompt alive block is only built once at session spawn, so
+        without this the loop is open mid-session: state updates were invisible
+        until the next restart."""
+        line = (
+            f"[ALIVE t={self._alive_tick} "
+            f"V={self._alive_valence:+.2f} A={self._alive_arousal:+.2f} "
+            f"T={self._alive_tension:.2f} mood={self._alive_mood}]"
+        )
+        directives = self._alive_directives()
+        if directives:
+            line += "\n" + "\n".join(f"[DIRECTIVE: {d}]" for d in directives)
+        return line
+
     def _save_full_alive_state(self):
         supabase_client.save_alive_state(
             tick=self._alive_tick,
@@ -202,7 +242,17 @@ class SessionManagerNode:
                 "Output [AROUSAL: +X.XX] or [AROUSAL: -X.XX] to update intensity/engagement level. "
                 "Output [MOOD: label] to update mood label. "
                 "Output [CURIOSITY: topic] to set current curiosity focus. "
-                "Output [TENSION: +X.XX] to adjust tension (unresolved threads, open questions)."
+                "Output [TENSION: +X.XX] to adjust tension (unresolved threads, open questions).\n"
+                "READING THE USER (affective loop): after each real user message, infer how the user "
+                "is doing and emit [ANTON_STATE: valence=+X.XX energy=+X.XX mode=<label> "
+                "explicit=<true|false> evidence=\"<one clause: what you read it from>\"]. "
+                "valence/energy are -1..+1. mode is a short kebab-case label like debugging-focused, "
+                "walking-reflective, rushed, frustrated-blocked. Set explicit=true only when the user "
+                "directly states how things are going; otherwise infer from tone, pacing, word choice, "
+                "channel (voice vs text), and time of day. Skip the tag when nothing meaningful changed "
+                "since the last one. Each message may also begin with an [ALIVE ...] line and "
+                "[DIRECTIVE: ...] lines — these are your own current state and derived behavioral "
+                "guidance; let them genuinely color tone, pacing, and length, not just content."
             )
             parts.append(alive_block)
             skills_index = supabase_client.fetch_skills_index()
@@ -744,7 +794,11 @@ class SessionManagerNode:
                     supabase_client.bump_rule_usage(fired_names)
 
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
-            message_text = (prefix + item.text) if prefix else item.text
+            # Affective loop (2026-08-08): current alive state + derived directives on
+            # every message — the system-prompt block goes stale immediately after spawn.
+            alive_prefix = self._alive_message_prefix()
+            prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
+            message_text = prefix + item.text
 
             # Inject semantically relevant dreams for real user messages.
             if item.source == "telegram":
@@ -833,6 +887,33 @@ class SessionManagerNode:
             delta = max(-0.2, min(0.2, float(_tension_m.group(1))))
             self._alive_tension = max(0.0, min(1.0, self._alive_tension + delta))
             _changed = True
+
+        # Affective loop (2026-08-08): inferred-Anton-state observation.
+        # Format: [ANTON_STATE: valence=+0.4 energy=-0.2 mode=walking-reflective
+        #          explicit=false evidence="voice msg, expansive phrasing"]
+        # All fields optional except the tag itself; parsed leniently so a
+        # partially-formed tag still yields a row rather than being dropped.
+        _anton_m = _re.search(r'\[ANTON_STATE:\s*([^\]]+)\]', response_text, _re.IGNORECASE)
+        if _anton_m:
+            body = _anton_m.group(1)
+            def _f(name):
+                m = _re.search(rf'{name}=([+-]?\d*\.?\d+)', body, _re.IGNORECASE)
+                return float(m.group(1)) if m else None
+            _mode_m = _re.search(r'mode=([\w-]+)', body, _re.IGNORECASE)
+            _evid_m = _re.search(r'evidence="([^"]*)"', body, _re.IGNORECASE)
+            _expl_m = _re.search(r'explicit=(true|false)', body, _re.IGNORECASE)
+            supabase_client.save_anton_state(
+                tick=self._alive_tick,
+                valence=_f("valence"),
+                energy=_f("energy"),
+                mode=_mode_m.group(1) if _mode_m else None,
+                explicit=bool(_expl_m and _expl_m.group(1).lower() == "true"),
+                evidence=_evid_m.group(1) if _evid_m else None,
+                channel=item.source,
+                axon_valence=self._alive_valence,
+                axon_arousal=self._alive_arousal,
+                axon_tension=self._alive_tension,
+            )
 
         if _changed:
             self._save_full_alive_state()
