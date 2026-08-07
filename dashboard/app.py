@@ -255,11 +255,23 @@ with tab_split:
 
     with col_cli:
         st.markdown(f'<p class="split-label">{left_choice}</p>', unsafe_allow_html=True)
-        st.components.v1.iframe(f"http://{TAILSCALE_IP}:{LEFT_OPTIONS[left_choice]}", height=PANE_H, scrolling=False)
+        st.components.v1.html(
+            f'<iframe src="http://{TAILSCALE_IP}:{LEFT_OPTIONS[left_choice]}" '
+            f'style="width:100%;height:{PANE_H}px;border:none;" '
+            f'allow="clipboard-write; clipboard-read"></iframe>',
+            height=PANE_H,
+            scrolling=False,
+        )
 
     with col_viewer:
         st.markdown(f'<p class="split-label">{right_choice}</p>', unsafe_allow_html=True)
-        st.components.v1.iframe(f"http://{TAILSCALE_IP}:{RIGHT_OPTIONS[right_choice]}", height=PANE_H, scrolling=False)
+        st.components.v1.html(
+            f'<iframe src="http://{TAILSCALE_IP}:{RIGHT_OPTIONS[right_choice]}" '
+            f'style="width:100%;height:{PANE_H}px;border:none;" '
+            f'allow="clipboard-write; clipboard-read"></iframe>',
+            height=PANE_H,
+            scrolling=False,
+        )
 
 # ── Tab: Manim ────────────────────────────────────────────────────────────────
 with tab_manim:

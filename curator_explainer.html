@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Curator Node</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; padding: 32px; }
+  h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 36px; }
+
+  /* Loop diagram */
+  .loop { display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 48px; flex-wrap: wrap; }
+  .node {
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 14px 20px; text-align: center; min-width: 130px;
+  }
+  .node .icon { font-size: 1.8rem; display: block; margin-bottom: 6px; }
+  .node .label { font-size: 0.78rem; font-weight: 600; color: #e6edf3; }
+  .node .sub { font-size: 0.68rem; color: #8b949e; margin-top: 2px; }
+  .arrow { color: #388bfd; font-size: 1.4rem; padding: 0 6px; }
+  .node.highlight { border-color: #388bfd; background: #0d1f3c; }
+  .node.warn { border-color: #d29922; background: #1f1a0d; }
+  .node.ok { border-color: #3fb950; background: #0d1f12; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 28px; margin-bottom: 48px; }
+  .timeline::before { content:''; position:absolute; left:10px; top:0; bottom:0; width:2px; background:#30363d; }
+  .tl-item { position:relative; margin-bottom:24px; }
+  .tl-item::before {
+    content:''; position:absolute; left:-22px; top:4px;
+    width:12px; height:12px; border-radius:50%; background:#388bfd; border:2px solid #0d1117;
+  }
+  .tl-item.warn::before { background:#d29922; }
+  .tl-item.ok::before { background:#3fb950; }
+  .tl-title { font-size:0.85rem; font-weight:600; margin-bottom:3px; }
+  .tl-body { font-size:0.78rem; color:#8b949e; line-height:1.5; }
+  .badge {
+    display:inline-block; padding:1px 8px; border-radius:4px; font-size:0.68rem;
+    font-weight:600; margin-left:8px; vertical-align:middle;
+  }
+  .badge.blue { background:#0d1f3c; color:#388bfd; border:1px solid #388bfd; }
+  .badge.yellow { background:#1f1a0d; color:#d29922; border:1px solid #d29922; }
+  .badge.green { background:#0d1f12; color:#3fb950; border:1px solid #3fb950; }
+
+  /* Threshold table */
+  .card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px; margin-bottom:32px; }
+  .card h3 { font-size:0.9rem; font-weight:600; margin-bottom:14px; color:#8b949e; text-transform:uppercase; letter-spacing:.05em; }
+  table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+  th { text-align:left; color:#8b949e; font-weight:600; padding:6px 10px; border-bottom:1px solid #30363d; }
+  td { padding:7px 10px; border-bottom:1px solid #21262d; }
+  tr:last-child td { border-bottom:none; }
+  .pill { padding:2px 8px; border-radius:20px; font-size:0.7rem; font-weight:600; }
+  .pill.archive { background:#1f0d0d; color:#f85149; border:1px solid #f85149; }
+  .pill.review { background:#1f1a0d; color:#d29922; border:1px solid #d29922; }
+
+  /* What gets stored */
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:32px; }
+  .col-card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; }
+  .col-card h3 { font-size:0.8rem; font-weight:600; color:#8b949e; text-transform:uppercase; letter-spacing:.05em; margin-bottom:12px; }
+  .field { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid #21262d; font-size:0.78rem; }
+  .field:last-child { border-bottom:none; }
+  .field .fname { color:#e6edf3; }
+  .field .ftype { color:#79c0ff; font-family:monospace; font-size:0.72rem; }
+  .field.new .fname::after { content:' NEW'; font-size:0.6rem; color:#3fb950; margin-left:4px; }
+</style>
+</head>
+<body>
+
+<h1>🧹 Curator Node</h1>
+<p class="subtitle">Daily knowledge maintenance — keeps skills and insights alive, relevant, and self-pruning</p>
+
+<!-- Main loop -->
+<div class="loop">
+  <div class="node highlight">
+    <span class="icon">🧠</span>
+    <div class="label">Relay session</div>
+    <div class="sub">completes a task</div>
+  </div>
+  <span class="arrow">→</span>
+  <div class="node">
+    <span class="icon">📝</span>
+    <div class="label">[SKILL:] tag</div>
+    <div class="sub">emitted in response</div>
+  </div>
+  <span class="arrow">→</span>
+  <div class="node ok">
+    <span class="icon">🗄</span>
+    <div class="label">rules table</div>
+    <div class="sub">created_by = agent</div>
+  </div>
+  <span class="arrow">→</span>
+  <div class="node">
+    <span class="icon">🔁</span>
+    <div class="label">Used again</div>
+    <div class="sub">use_count++</div>
+  </div>
+  <span class="arrow">→</span>
+  <div class="node warn">
+    <span class="icon">🧹</span>
+    <div class="label">Curator</div>
+    <div class="sub">reviews every 24h</div>
+  </div>
+  <span class="arrow">→</span>
+  <div class="node">
+    <span class="icon">📦</span>
+    <div class="label">Archive / Keep</div>
+    <div class="sub">based on usage</div>
+  </div>
+</div>
+
+<!-- Timeline: what curator does each run -->
+<div class="card">
+  <h3>What happens each 24h run</h3>
+  <div class="timeline">
+
+    <div class="tl-item">
+      <div class="tl-title">Query agent-created rules <span class="badge blue">rules table</span></div>
+      <div class="tl-body">Fetches all rows where <code>created_by = 'agent'</code> and <code>active = true</code>. These are skills the relay wrote itself — never touches bundled or manually-created rules.</div>
+    </div>
+
+    <div class="tl-item warn">
+      <div class="tl-title">Detect stale skills <span class="badge yellow">low use</span></div>
+      <div class="tl-body">Checks age and use_count. Skills unused for 14+ days with fewer than 2 uses are flagged as review candidates and logged.</div>
+    </div>
+
+    <div class="tl-item warn">
+      <div class="tl-title">Auto-archive dead skills <span class="badge yellow">0 uses · 60+ days</span></div>
+      <div class="tl-body">Skills with use_count = 0 and age &gt; 60 days are set to <code>active = false</code> with a curator_note explaining why. Never deleted — always recoverable.</div>
+    </div>
+
+    <div class="tl-item">
+      <div class="tl-title">Query insights <span class="badge blue">insights table</span></div>
+      <div class="tl-body">Runs same analysis on the insights table — accumulated knowledge from observations across sessions.</div>
+    </div>
+
+    <div class="tl-item warn">
+      <div class="tl-title">Archive stale insights <span class="badge yellow">0 uses · 90+ days</span></div>
+      <div class="tl-body">Insights never referenced for 90 days are archived. Insights with low use after 30 days are flagged.</div>
+    </div>
+
+    <div class="tl-item ok">
+      <div class="tl-title">Sleep 24h <span class="badge green">next run</span></div>
+      <div class="tl-body">Process stays alive in the curator tmux session, wakes up exactly 24 hours later.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Thresholds -->
+<div class="card">
+  <h3>Thresholds</h3>
+  <table>
+    <tr><th>Table</th><th>Condition</th><th>Action</th></tr>
+    <tr><td>rules (agent)</td><td>use_count = 0, age &gt; 60 days</td><td><span class="pill archive">auto-archive</span></td></tr>
+    <tr><td>rules (agent)</td><td>use_count &lt; 2, age &gt; 14 days</td><td><span class="pill review">flag for review</span></td></tr>
+    <tr><td>insights</td><td>use_count = 0, age &gt; 90 days</td><td><span class="pill archive">auto-archive</span></td></tr>
+    <tr><td>insights</td><td>use_count &lt; 2, age &gt; 30 days</td><td><span class="pill review">flag for review</span></td></tr>
+  </table>
+</div>
+
+<!-- Schema additions -->
+<div class="cols">
+  <div class="col-card">
+    <h3>rules table — new columns</h3>
+    <div class="field new"><span class="fname">use_count</span><span class="ftype">INTEGER DEFAULT 0</span></div>
+    <div class="field new"><span class="fname">last_used</span><span class="ftype">TIMESTAMPTZ</span></div>
+    <div class="field new"><span class="fname">created_by</span><span class="ftype">TEXT</span></div>
+    <div class="field new"><span class="fname">curator_note</span><span class="ftype">TEXT</span></div>
+    <div class="field"><span class="fname">name</span><span class="ftype">TEXT</span></div>
+    <div class="field"><span class="fname">content</span><span class="ftype">TEXT</span></div>
+    <div class="field"><span class="fname">active</span><span class="ftype">BOOLEAN</span></div>
+  </div>
+  <div class="col-card">
+    <h3>insights table — new columns</h3>
+    <div class="field new"><span class="fname">use_count</span><span class="ftype">INTEGER DEFAULT 0</span></div>
+    <div class="field new"><span class="fname">last_used</span><span class="ftype">TIMESTAMPTZ</span></div>
+    <div class="field new"><span class="fname">archived</span><span class="ftype">BOOLEAN</span></div>
+    <div class="field new"><span class="fname">curator_note</span><span class="ftype">TEXT</span></div>
+    <div class="field"><span class="fname">content</span><span class="ftype">TEXT</span></div>
+    <div class="field"><span class="fname">confidence</span><span class="ftype">INTEGER</span></div>
+    <div class="field"><span class="fname">project_id</span><span class="ftype">UUID</span></div>
+  </div>
+</div>
+
+</body>
+</html>
