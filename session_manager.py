@@ -943,7 +943,13 @@ class SessionManagerNode:
         conversation has been idle for a while. The reflection runs through the
         normal queue -> Claude -> tag-parsing pipeline, so dreams/insights land
         via existing machinery; telegram_node routes source='reflection' to a
-        sink branch (never delivered as a chat reply)."""
+        sink branch (never delivered as a chat reply).
+
+        Multi-instance: gated by AXON_REFLECTION so only the dev/home instance
+        dreams — the release instance at work stays lean."""
+        if not config.REFLECTION_ENABLED:
+            log.info(f"Reflection tick disabled on instance '{config.INSTANCE}' (AXON_REFLECTION=0)")
+            return
         while self._running:
             time.sleep(600)
             try:

@@ -78,3 +78,13 @@ EXTRA_USER_IDS: str = get("TELEGRAM_EXTRA_USER_IDS", "")
 # Proactive check-in interval in seconds (default: 10 min)
 PROACTIVE_INTERVAL: int = int(get("PROACTIVE_INTERVAL", "600") or "600")
 PROACTIVE_ENABLED: bool = get("PROACTIVE_ENABLED", "1").lower() not in ("0", "false", "no")
+
+# Multi-instance (2026-08-08): identity of this Axon deployment. Instances share
+# the append-only Supabase tables (one memory) but own their alive_state /
+# anton_model rows (per-body mood). Set AXON_INSTANCE in .env per machine
+# (rog = dev at home, aevadim09 = release at work); hostname fallback otherwise.
+import socket as _socket
+INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
+
+# Reflection tick — dev/home instance only: set AXON_REFLECTION=0 at work.
+REFLECTION_ENABLED: bool = get("AXON_REFLECTION", "1").lower() not in ("0", "false", "no")

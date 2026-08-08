@@ -780,7 +780,8 @@ def fetch_alive_state() -> dict | None:
     """Fetch the single alive_state row. Returns dict or None if unavailable."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return None
-    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state?id=eq.1&limit=1"
+    url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state"
+           f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
@@ -810,7 +811,7 @@ def save_alive_state(
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return
     payload: dict = {
-        "id": 1,
+        "instance": config.INSTANCE,
         "tick": tick,
         "valence": round(valence, 4),
         "mood_label": mood_label,
@@ -853,7 +854,8 @@ def fetch_anton_model() -> dict | None:
     state — affective loop v3, 2026-08-08). Returns dict or None."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return None
-    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model?id=eq.1&limit=1"
+    url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model"
+           f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
@@ -871,7 +873,8 @@ def save_anton_model(fields: dict) -> None:
     """Upsert the anton_model row (id=1). Non-blocking."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return
-    payload = {"id": 1, "updated_at": datetime.utcnow().isoformat() + "Z", **fields}
+    payload = {"instance": config.INSTANCE,
+               "updated_at": datetime.utcnow().isoformat() + "Z", **fields}
 
     def _write():
         url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model"
