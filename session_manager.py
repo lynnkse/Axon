@@ -166,7 +166,13 @@ class SessionManagerNode:
     # slow EMA so "below baseline" means below HIS normal, not below zero.
     ANTON_OBS_SIGMA_EXPLICIT = 0.10
     ANTON_OBS_SIGMA_INFERRED = 0.20
-    ANTON_BASELINE_EMA = 0.02          # per observation (0.04 when explicit)
+    # Baseline moves ONLY on explicit observations (2026-08-08 fix): letting
+    # inferred guesses shift baseline meant a genuinely sustained bad stretch
+    # dragged the baseline down with it within days, quietly re-labeling
+    # "chronic" as "normal" and self-clearing the divergence flag exactly
+    # when it should fire hardest. Explicit-only + slow rate keeps baseline
+    # anchored to what Anton has actually said, not my running guesswork.
+    ANTON_BASELINE_EMA = 0.03          # per EXPLICIT observation only
     ANTON_SIGMA_DRIFT_PER_HOUR = 0.005 # uncertainty grows between observations
     ANTON_DRIFT_TO_BASELINE_PER_HOUR = 0.01  # prediction step: his state reverts too
     ANTON_DIVERGENCE_MARGIN = 0.25     # mu < baseline - margin => divergent
@@ -312,7 +318,6 @@ class SessionManagerNode:
         self._anton_last_observation = now
 
         obs_sigma = self.ANTON_OBS_SIGMA_EXPLICIT if explicit else self.ANTON_OBS_SIGMA_INFERRED
-        ema = 0.04 if explicit else self.ANTON_BASELINE_EMA
         drift = min(1.0, self.ANTON_DRIFT_TO_BASELINE_PER_HOUR * hours)
 
         def _step(mu, sigma, baseline, z):
@@ -323,7 +328,9 @@ class SessionManagerNode:
             k = sigma ** 2 / (sigma ** 2 + obs_sigma ** 2)
             mu = max(-1.0, min(1.0, mu + k * (z - mu)))
             sigma = max(0.05, ((1 - k) ** 0.5) * sigma)
-            baseline = baseline + ema * (z - baseline)
+            # Baseline: explicit-only (see ANTON_BASELINE_EMA comment above)
+            if explicit:
+                baseline = baseline + self.ANTON_BASELINE_EMA * (z - baseline)
             return mu, sigma, baseline
 
         if v_obs is not None:

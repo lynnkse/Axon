@@ -870,7 +870,7 @@ def fetch_anton_model() -> dict | None:
 
 
 def save_anton_model(fields: dict) -> None:
-    """Upsert the anton_model row (id=1). Non-blocking."""
+    """Upsert this instance's anton_model row. Non-blocking."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return
     payload = {"instance": config.INSTANCE,
