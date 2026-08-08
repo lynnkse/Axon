@@ -243,6 +243,12 @@ class ResponseSubscriber:
                                 # message. Visibility into RALPH stays via the RALPH tmux
                                 # pane / dashboard split view only.
                                 pass
+                            elif msg.get("source") == "reflection":
+                                # Idle reflection ticks (affective loop v4) are internal
+                                # monologue -- same unbranched-source corruption risk as
+                                # ralph above. Dreams/insights they produce reach Anton
+                                # through recall injection, never as a direct chat message.
+                                pass
                             else:
                                 self._loop.call_soon_threadsafe(
                                     self._response_queue.put_nowait, msg

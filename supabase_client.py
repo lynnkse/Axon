@@ -848,6 +848,53 @@ def save_alive_state(
     threading.Thread(target=_write, daemon=True).start()
 
 
+def fetch_anton_model() -> dict | None:
+    """Fetch the single anton_model row (persistent filtered estimate of Anton's
+    state — affective loop v3, 2026-08-08). Returns dict or None."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return None
+    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model?id=eq.1&limit=1"
+    req = urllib.request.Request(url, headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            rows = json.loads(resp.read().decode())
+            return rows[0] if rows else None
+    except Exception as e:
+        log.warning(f"fetch_anton_model failed: {e}")
+        return None
+
+
+def save_anton_model(fields: dict) -> None:
+    """Upsert the anton_model row (id=1). Non-blocking."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return
+    payload = {"id": 1, "updated_at": datetime.utcnow().isoformat() + "Z", **fields}
+
+    def _write():
+        url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={
+                "apikey": config.SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8):
+                pass
+        except Exception as e:
+            log.warning(f"save_anton_model failed: {e}")
+
+    threading.Thread(target=_write, daemon=True).start()
+
+
 def save_anton_state(
     tick: int,
     valence: float | None,

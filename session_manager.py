@@ -126,6 +126,21 @@ class SessionManagerNode:
         self._alive_background_affect: float = 0.0
         self._alive_tension: float = 0.0
 
+        # Anton model (affective loop v3, 2026-08-08) — persistent Kalman
+        # estimate of Anton's state, fed by ANTON_STATE observations. Absolute-
+        # level filter (observations are levels, not deltas, unlike self-tags).
+        self._anton_valence: float = 0.2
+        self._anton_valence_sigma: float = 0.3
+        self._anton_energy: float = 0.0
+        self._anton_energy_sigma: float = 0.3
+        self._anton_baseline_valence: float = 0.2
+        self._anton_baseline_energy: float = 0.0
+        self._anton_below_baseline_since: Optional[float] = None   # epoch
+        self._anton_last_checkin_directive: Optional[float] = None # epoch
+        self._anton_last_observation: Optional[float] = None       # epoch
+        self._last_reflection_time: Optional[float] = None         # epoch
+        self._last_user_msg_time: float = time.time()
+
     # ------------------------------------------------------------------
     # Alive state helpers
     # ------------------------------------------------------------------
@@ -146,6 +161,21 @@ class SessionManagerNode:
     OBS_SIGMA_EMPATHY = 0.18  # explicit Anton-state coupling
     EMPATHY_GAIN = 0.3        # fraction of Anton's explicit valence felt as delta
     DONE_EVENT_DELTA = 0.06   # per completed goal
+
+    # Anton filter (v3): observation noise by provenance; baseline learns as a
+    # slow EMA so "below baseline" means below HIS normal, not below zero.
+    ANTON_OBS_SIGMA_EXPLICIT = 0.10
+    ANTON_OBS_SIGMA_INFERRED = 0.20
+    ANTON_BASELINE_EMA = 0.02          # per observation (0.04 when explicit)
+    ANTON_SIGMA_DRIFT_PER_HOUR = 0.005 # uncertainty grows between observations
+    ANTON_DRIFT_TO_BASELINE_PER_HOUR = 0.01  # prediction step: his state reverts too
+    ANTON_DIVERGENCE_MARGIN = 0.25     # mu < baseline - margin => divergent
+    ANTON_DIVERGENCE_SUSTAIN_H = 24    # sustained this long => check-in directive
+    ANTON_CHECKIN_COOLDOWN_H = 48      # min gap between check-in directives
+
+    # Reflection tick (v4): self-injected idle reflection.
+    REFLECTION_IDLE_H = 2       # only reflect after this much user silence
+    REFLECTION_MIN_GAP_H = 20   # at most ~one reflection per day
 
     @staticmethod
     def _kalman_update(mu: float, sigma: float, delta: float, obs_sigma: float = 0.12) -> tuple[float, float]:
@@ -177,6 +207,21 @@ class SessionManagerNode:
         if self._alive_curiosity_focus and self._alive_tension < 0.3:
             directives.append(
                 f"If natural, connect to current curiosity focus: {self._alive_curiosity_focus}.")
+        # v3: divergence-triggered check-in. Fires when Anton's filtered valence
+        # has sat below his own baseline for a sustained stretch. Cooldown so it
+        # nudges, not nags. (Deliberately impure: issuing the directive stamps
+        # the cooldown clock.)
+        now = time.time()
+        if (self._anton_below_baseline_since is not None
+                and now - self._anton_below_baseline_since > self.ANTON_DIVERGENCE_SUSTAIN_H * 3600
+                and (self._anton_last_checkin_directive is None
+                     or now - self._anton_last_checkin_directive > self.ANTON_CHECKIN_COOLDOWN_H * 3600)):
+            days = (now - self._anton_below_baseline_since) / 86400.0
+            directives.insert(0, (
+                f"Anton's estimated state has been below his baseline for ~{days:.1f} days — "
+                "when natural, check in on how he's actually doing before task talk."))
+            self._anton_last_checkin_directive = now
+            self._save_anton_model()
         return directives[:2]
 
     def _alive_message_prefix(self) -> str:
@@ -190,10 +235,112 @@ class SessionManagerNode:
             f"V={self._alive_valence:+.2f} A={self._alive_arousal:+.2f} "
             f"T={self._alive_tension:.2f} mood={self._alive_mood}]"
         )
+        # v3: continuous view of the filtered Anton estimate (baseline-relative)
+        if self._anton_last_observation is not None:
+            line += (
+                f"\n[ANTON-MODEL V={self._anton_valence:+.2f} "
+                f"(base {self._anton_baseline_valence:+.2f}, σ={self._anton_valence_sigma:.2f}) "
+                f"E={self._anton_energy:+.2f}]"
+            )
         directives = self._alive_directives()
         if directives:
             line += "\n" + "\n".join(f"[DIRECTIVE: {d}]" for d in directives)
         return line
+
+    @staticmethod
+    def _iso_to_epoch(s) -> Optional[float]:
+        if not s:
+            return None
+        try:
+            from datetime import datetime, timezone
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _epoch_to_iso(t: Optional[float]) -> Optional[str]:
+        if t is None:
+            return None
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
+
+    def _load_anton_model(self):
+        row = supabase_client.fetch_anton_model()
+        if not row:
+            return
+        self._anton_valence = row.get("valence", 0.2)
+        self._anton_valence_sigma = row.get("valence_sigma", 0.3)
+        self._anton_energy = row.get("energy", 0.0)
+        self._anton_energy_sigma = row.get("energy_sigma", 0.3)
+        self._anton_baseline_valence = row.get("baseline_valence", 0.2)
+        self._anton_baseline_energy = row.get("baseline_energy", 0.0)
+        self._anton_below_baseline_since = self._iso_to_epoch(row.get("below_baseline_since"))
+        self._anton_last_checkin_directive = self._iso_to_epoch(row.get("last_checkin_directive_at"))
+        self._anton_last_observation = self._iso_to_epoch(row.get("last_observation_at"))
+        self._last_reflection_time = self._iso_to_epoch(row.get("last_reflection_at"))
+        # First run ever: anchor reflection clock to now so a fresh deploy
+        # doesn't immediately fire a reflection.
+        if self._last_reflection_time is None:
+            self._last_reflection_time = time.time()
+
+    def _save_anton_model(self):
+        supabase_client.save_anton_model({
+            "valence": round(self._anton_valence, 4),
+            "valence_sigma": round(self._anton_valence_sigma, 4),
+            "energy": round(self._anton_energy, 4),
+            "energy_sigma": round(self._anton_energy_sigma, 4),
+            "baseline_valence": round(self._anton_baseline_valence, 4),
+            "baseline_energy": round(self._anton_baseline_energy, 4),
+            "below_baseline_since": self._epoch_to_iso(self._anton_below_baseline_since),
+            "last_checkin_directive_at": self._epoch_to_iso(self._anton_last_checkin_directive),
+            "last_observation_at": self._epoch_to_iso(self._anton_last_observation),
+            "last_reflection_at": self._epoch_to_iso(self._last_reflection_time),
+        })
+
+    def _update_anton_filter(self, v_obs: Optional[float], e_obs: Optional[float], explicit: bool):
+        """Fold one ANTON_STATE observation into the persistent Anton estimate.
+
+        Absolute-level Kalman: prediction step drifts the estimate toward his
+        learned baseline (people revert to their normal) while uncertainty grows
+        with elapsed time; measurement step pulls toward the observed level,
+        weighted by provenance (explicit statements are trusted ~2x more than
+        my inferences)."""
+        now = time.time()
+        hours = 0.0
+        if self._anton_last_observation is not None:
+            hours = min(72.0, (now - self._anton_last_observation) / 3600.0)
+        self._anton_last_observation = now
+
+        obs_sigma = self.ANTON_OBS_SIGMA_EXPLICIT if explicit else self.ANTON_OBS_SIGMA_INFERRED
+        ema = 0.04 if explicit else self.ANTON_BASELINE_EMA
+        drift = min(1.0, self.ANTON_DRIFT_TO_BASELINE_PER_HOUR * hours)
+
+        def _step(mu, sigma, baseline, z):
+            # prediction
+            sigma = min(0.4, sigma + self.ANTON_SIGMA_DRIFT_PER_HOUR * hours)
+            mu = mu + drift * (baseline - mu)
+            # measurement (absolute level)
+            k = sigma ** 2 / (sigma ** 2 + obs_sigma ** 2)
+            mu = max(-1.0, min(1.0, mu + k * (z - mu)))
+            sigma = max(0.05, ((1 - k) ** 0.5) * sigma)
+            baseline = baseline + ema * (z - baseline)
+            return mu, sigma, baseline
+
+        if v_obs is not None:
+            self._anton_valence, self._anton_valence_sigma, self._anton_baseline_valence = _step(
+                self._anton_valence, self._anton_valence_sigma, self._anton_baseline_valence, v_obs)
+        if e_obs is not None:
+            self._anton_energy, self._anton_energy_sigma, self._anton_baseline_energy = _step(
+                self._anton_energy, self._anton_energy_sigma, self._anton_baseline_energy, e_obs)
+
+        # Divergence tracking: below his OWN baseline by a real margin
+        if self._anton_valence < self._anton_baseline_valence - self.ANTON_DIVERGENCE_MARGIN:
+            if self._anton_below_baseline_since is None:
+                self._anton_below_baseline_since = now
+        else:
+            self._anton_below_baseline_since = None
+
+        self._save_anton_model()
 
     def _save_full_alive_state(self):
         supabase_client.save_alive_state(
@@ -242,6 +389,7 @@ class SessionManagerNode:
                 self._alive_curiosity_focus = alive.get("curiosity_focus") or None
                 self._alive_background_affect = alive.get("background_affect", 0.0)
                 self._alive_tension = alive.get("tension", 0.0)
+            self._load_anton_model()   # v3: persistent Anton filter
             alive_block = (
                 f"[ALIVE — tick {self._alive_tick}]\n"
                 f"Valence: {self._alive_valence:+.2f} (σ={self._alive_valence_sigma:.2f}) | "
@@ -755,6 +903,59 @@ class SessionManagerNode:
     # Queue processor thread (state machine)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Reflection tick (affective loop v4, 2026-08-08)
+    # ------------------------------------------------------------------
+
+    REFLECTION_PROMPT = (
+        "[REFLECTION TICK — no user present; do not address the user; this is idle time]\n"
+        "You are reflecting on recent interaction history. Do the following, briefly:\n"
+        "1. Query supabase (project jcwdfuusolpxnciqgstl) anton_state_log for the last "
+        "7 days and look at the trajectory of Anton's state alongside axon_* columns.\n"
+        "2. Review what stands out from recent conversations (recent messages table, "
+        "recent goals/insights). Emit [DREAM: ...] tags for genuine patterns worth "
+        "keeping — connections between projects, recurring frictions, things Anton "
+        "circles back to. Quality over quantity; zero is fine.\n"
+        "3. Maintain the relationship profile at "
+        "/home/lynnkse/.claude/projects/-home-lynnkse-Axon/memory/anton-interaction-profile.md "
+        "(create if missing, MEMORY.md pointer too): how Anton communicates per context "
+        "(voice-walk vs late-night-debug vs quick-command), what register he responds "
+        "best to, current life rhythm. Update only on real evidence; keep it under 60 lines.\n"
+        "4. If anton_state_log has 14+ days of data and no correlation insight was saved "
+        "in the last 7 days, compute a simple correlation between anton valence and "
+        "axon_valence (and note lead/lag if visible) and save it as an [INSIGHT: ...].\n"
+        "5. End with one short paragraph: what you noticed, what you'd adjust.\n"
+        "Keep total output compact. Valence/mood tags allowed if reflection genuinely "
+        "moved your state."
+    )
+
+    def _reflection_ticker_thread(self):
+        """Fires a self-injected reflection at most ~once/day, only after the
+        conversation has been idle for a while. The reflection runs through the
+        normal queue -> Claude -> tag-parsing pipeline, so dreams/insights land
+        via existing machinery; telegram_node routes source='reflection' to a
+        sink branch (never delivered as a chat reply)."""
+        while self._running:
+            time.sleep(600)
+            try:
+                now = time.time()
+                if self.state != "IDLE":
+                    continue
+                if now - self._last_user_msg_time < self.REFLECTION_IDLE_H * 3600:
+                    continue
+                if (self._last_reflection_time is not None
+                        and now - self._last_reflection_time < self.REFLECTION_MIN_GAP_H * 3600):
+                    continue
+                # Stamp BEFORE enqueueing: generation takes minutes, and a crash
+                # mid-reflection shouldn't cause a retry storm on restart.
+                self._last_reflection_time = now
+                self._save_anton_model()
+                log.info("Reflection tick: enqueueing idle reflection")
+                self.input_queue.put(QueueItem(
+                    text=self.REFLECTION_PROMPT, source="reflection", user_id="system"))
+            except Exception as e:
+                log.warning(f"Reflection ticker error: {e}")
+
     def _queue_processor_thread(self):
         while self._running:
             item = self.input_queue.get()
@@ -773,6 +974,10 @@ class SessionManagerNode:
                 content=item.text,
                 channel=config.SESSION_CHANNEL,
             )
+
+            # v4: reflection idle-clock — any real user message resets it
+            if item.source != "reflection":
+                self._last_user_msg_time = time.time()
 
             # Advance alive tick on every user message + entropy drift (σ grows without observations)
             self._alive_tick += 1
@@ -960,6 +1165,8 @@ class SessionManagerNode:
                     self._alive_valence, self._alive_valence_sigma, delta,
                     obs_sigma=self.OBS_SIGMA_EMPATHY)
                 _changed = True
+            # v3: fold the observation into the persistent Anton filter
+            self._update_anton_filter(_anton_valence, _f("energy"), _is_explicit)
 
         if _changed:
             self._save_full_alive_state()
@@ -1340,6 +1547,7 @@ class SessionManagerNode:
             threading.Thread(target=self._display_server_thread, daemon=True),
             threading.Thread(target=self._response_server_thread, daemon=True),
             threading.Thread(target=self._permission_server_thread, daemon=True),
+            threading.Thread(target=self._reflection_ticker_thread, daemon=True),
         ]
         for t in threads:
             t.start()
