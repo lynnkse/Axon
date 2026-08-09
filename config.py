@@ -79,10 +79,13 @@ EXTRA_USER_IDS: str = get("TELEGRAM_EXTRA_USER_IDS", "")
 PROACTIVE_INTERVAL: int = int(get("PROACTIVE_INTERVAL", "600") or "600")
 PROACTIVE_ENABLED: bool = get("PROACTIVE_ENABLED", "1").lower() not in ("0", "false", "no")
 
-# Multi-instance (2026-08-08): identity of this Axon deployment. Instances share
-# the append-only Supabase tables (one memory) but own their alive_state /
-# anton_model rows (per-body mood). Set AXON_INSTANCE in .env per machine
-# (rog = dev at home, aevadim09 = release at work); hostname fallback otherwise.
+# Multi-instance (2026-08-08, merged back to shared state 2026-08-09): identity
+# of this Axon deployment. Instances share ALL Supabase state — mood/tick in
+# alive_state and anton_model are one continuous "me", not per-body, since
+# Anton only ever talks to one instance at a time. INSTANCE is now purely
+# informational (stamped as last-writer, used by the reflection-tick collision
+# guard below). Set AXON_INSTANCE in .env per machine (rog = dev at home,
+# aevadim09 = release at work); hostname fallback otherwise.
 import socket as _socket
 INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
 

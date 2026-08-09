@@ -40,6 +40,7 @@ import json
 import logging
 import subprocess
 import time
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -953,7 +954,15 @@ class SessionManagerNode:
         sink branch (never delivered as a chat reply).
 
         Multi-instance: gated by AXON_REFLECTION so only the dev/home instance
-        dreams — the release instance at work stays lean."""
+        dreams — the release instance at work stays lean.
+
+        Collision guard (2026-08-09, state merged back to shared): this
+        instance's idle clock only tracks messages sent to IT. If Anton is
+        actively on the other instance, this one looks idle locally while the
+        shared alive_state/anton_model rows are being actively written
+        elsewhere. Refetch alive_state right before firing and skip if it was
+        touched more recently than our own idle threshold — that freshness
+        means someone is live on another instance right now."""
         if not config.REFLECTION_ENABLED:
             log.info(f"Reflection tick disabled on instance '{config.INSTANCE}' (AXON_REFLECTION=0)")
             return
@@ -968,6 +977,17 @@ class SessionManagerNode:
                 if (self._last_reflection_time is not None
                         and now - self._last_reflection_time < self.REFLECTION_MIN_GAP_H * 3600):
                     continue
+                shared = supabase_client.fetch_alive_state()
+                if shared and shared.get("last_updated"):
+                    try:
+                        last_dt = datetime.fromisoformat(shared["last_updated"].replace("Z", "+00:00"))
+                        age_h = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                        if age_h < self.REFLECTION_IDLE_H:
+                            log.info(f"Reflection tick skipped: shared alive_state updated {age_h:.1f}h ago "
+                                     f"(instance={shared.get('instance')!r}) — likely active elsewhere")
+                            continue
+                    except Exception as e:
+                        log.warning(f"Reflection freshness check failed, proceeding anyway: {e}")
                 # Stamp BEFORE enqueueing: generation takes minutes, and a crash
                 # mid-reflection shouldn't cause a retry storm on restart.
                 self._last_reflection_time = now
