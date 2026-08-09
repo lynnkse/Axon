@@ -10,9 +10,22 @@
 # Never kills sessions. Always ends with all 5 sessions alive and processes running.
 
 AXON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PYTHON="$HOME/.virtualenvs/lynnkse/bin/python3.12"
+# Source .env for shell-level overrides (e.g. AXON_PYTHON_DIR) — the Python
+# processes load .env themselves via python-dotenv, but this launcher script
+# needs it too since it picks the interpreter before Python ever runs.
+[[ -f "$AXON_DIR/.env" ]] && set -a && source "$AXON_DIR/.env" && set +a
+# Multi-machine (2026-08-09): AXON_PYTHON_DIR lets each deployment point at its
+# own venv (e.g. aevadim-09's pyenv-virtualenv "claude-relay") without editing
+# this script. Set it in .env or export before running. Falls back to ROG's
+# original hardcoded paths for backward compat.
+if [[ -n "$AXON_PYTHON_DIR" ]]; then
+    VENV_PYTHON="$AXON_PYTHON_DIR/python3"
+    STREAMLIT="$AXON_PYTHON_DIR/streamlit"
+else
+    VENV_PYTHON="$HOME/.virtualenvs/lynnkse/bin/python3.12"
+    STREAMLIT="$HOME/.pyenv/versions/3.12.9/bin/streamlit"
+fi
 PYENV_PYTHON="$HOME/.pyenv/versions/3.12.9/bin/python3"
-STREAMLIT="$HOME/.pyenv/versions/3.12.9/bin/streamlit"
 TTYD="$AXON_DIR/ttyd"
 LOG_DIR="$AXON_DIR/logs"
 DASH_LOG_DIR="$AXON_DIR/dashboard/logs"
