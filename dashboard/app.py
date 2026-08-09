@@ -238,7 +238,19 @@ with tab_files:
 
 # ── Tab: Split View ───────────────────────────────────────────────────────────
 with tab_split:
-    TAILSCALE_IP = "100.73.56.102"
+    # Multi-machine fix (2026-08-09): this was hardcoded to ROG's Tailscale IP,
+    # so opening the dashboard on ANY machine embedded ROG's ttyd streams --
+    # the outer Streamlit page was local, but the CLI/RALPH terminal iframes
+    # silently pointed cross-machine at ROG regardless of which instance served
+    # the page. Detect the local machine's own IP instead, same pattern as
+    # start_axon.sh's TAILSCALE_IP detection.
+    import subprocess as _subprocess
+    try:
+        TAILSCALE_IP = _subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3
+        ).stdout.strip() or "127.0.0.1"
+    except Exception:
+        TAILSCALE_IP = "127.0.0.1"
     PANE_H = 820
 
     # Left pane selector
