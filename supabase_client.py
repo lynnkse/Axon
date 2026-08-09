@@ -777,13 +777,11 @@ def bump_rule_usage(names: list[str]):
 
 
 def fetch_alive_state() -> dict | None:
-    """Fetch the single shared alive_state row (id=1). Returns dict or None if
-    unavailable. Mood/tick are shared across all Axon instances — Anton is only
-    ever talking to one at a time, so there's one continuous "me", not a body
-    per machine (2026-08-09, reverting the 2026-08-08 instance-keyed split)."""
+    """Fetch the single alive_state row. Returns dict or None if unavailable."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return None
-    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state?id=eq.1&limit=1"
+    url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state"
+           f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
@@ -809,12 +807,10 @@ def save_alive_state(
     background_affect: float = 0.0,
     tension: float = 0.0,
 ) -> None:
-    """Upsert the single shared alive_state row (id=1). Non-blocking.
-    `instance` is stamped as informational last-writer only — not a partition key."""
+    """Upsert the alive_state row. Non-blocking."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return
     payload: dict = {
-        "id": 1,
         "instance": config.INSTANCE,
         "tick": tick,
         "valence": round(valence, 4),
@@ -854,12 +850,12 @@ def save_alive_state(
 
 
 def fetch_anton_model() -> dict | None:
-    """Fetch the single shared anton_model row (id=1) — persistent filtered
-    estimate of Anton's state, shared across all Axon instances (affective
-    loop v3, 2026-08-08; reverted to shared 2026-08-09). Returns dict or None."""
+    """Fetch the single anton_model row (persistent filtered estimate of Anton's
+    state — affective loop v3, 2026-08-08). Returns dict or None."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return None
-    url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model?id=eq.1&limit=1"
+    url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model"
+           f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
@@ -874,11 +870,10 @@ def fetch_anton_model() -> dict | None:
 
 
 def save_anton_model(fields: dict) -> None:
-    """Upsert the single shared anton_model row (id=1). Non-blocking.
-    `instance` is stamped as informational last-writer only — not a partition key."""
+    """Upsert this instance's anton_model row. Non-blocking."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return
-    payload = {"id": 1, "instance": config.INSTANCE,
+    payload = {"instance": config.INSTANCE,
                "updated_at": datetime.utcnow().isoformat() + "Z", **fields}
 
     def _write():
