@@ -33,6 +33,12 @@ def _load_env():
 _env = _load_env()
 SUPABASE_URL = os.environ.get("SUPABASE_URL") or _env.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or _env.get("SUPABASE_ANON_KEY", "")
+# Instance label (2026-08-09): shown in the page title so it's obvious at a
+# glance which machine's dashboard you're looking at -- same AXON_INSTANCE
+# convention as config.py, with hostname fallback if unset.
+import socket as _socket
+AXON_INSTANCE = (os.environ.get("AXON_INSTANCE") or _env.get("AXON_INSTANCE", "")
+                  or _socket.gethostname()).lower()
 
 DOCS_DIR = Path(__file__).parent.parent  # ~/Axon — serves HTMLs from here
 
@@ -54,7 +60,7 @@ def _sb_get(table: str, params: str = "") -> list:
 
 
 # ── Page setup ────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Axon Dashboard", page_icon="⚡", layout="wide")
+st.set_page_config(page_title=f"Axon Dashboard — {AXON_INSTANCE}", page_icon="⚡", layout="wide")
 
 st.markdown("""
 <style>
@@ -73,7 +79,13 @@ iframe { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("##### ⚡ Axon Dashboard")
+_instance_color = {"rog": "#4A90D9", "aevadim09": "#D97A4A"}.get(AXON_INSTANCE, "#888")
+st.markdown(
+    f"##### ⚡ Axon Dashboard &nbsp; "
+    f'<span style="background:{_instance_color}; color:white; padding:2px 10px; '
+    f'border-radius:10px; font-size:0.7em; vertical-align:middle;">{AXON_INSTANCE.upper()}</span>',
+    unsafe_allow_html=True,
+)
 
 tab_food, tab_fitness, tab_alive, tab_files, tab_split, tab_manim = st.tabs(
     ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "📄 Files", "⚡ Split View", "🎬 Manim"]
