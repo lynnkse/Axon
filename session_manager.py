@@ -40,6 +40,7 @@ import json
 import logging
 import subprocess
 import time
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,11 @@ from typing import Optional
 
 import config
 import supabase_client
+from actor_model.composer import compose_turn
+from actor_model.ingest import interaction_event, response_events
+from actor_model.shadow import actor_is_authoritative, compare_numeric, typed_base
+from actor_model.actors import AntonActor, AxonActor
+from actor_model.types import ActorRecord, Disposition, TransitionContext
 
 logging.basicConfig(
     level=logging.INFO,
@@ -362,6 +368,47 @@ class SessionManagerNode:
             background_affect=self._alive_background_affect,
             tension=self._alive_tension,
         )
+
+    def _shadow_alive_state(self) -> dict:
+        return typed_base({"tick": self._alive_tick, "valence": self._alive_valence,
+            "valence_sigma": self._alive_valence_sigma, "arousal": self._alive_arousal,
+            "arousal_sigma": self._alive_arousal_sigma, "mood": self._alive_mood,
+            "personality_note": self._alive_personality, "curiosity_focus": self._alive_curiosity_focus,
+            "background_affect": self._alive_background_affect, "tension": self._alive_tension})
+
+    def _shadow_anton_state(self) -> dict:
+        return typed_base({"valence":self._anton_valence,"valence_sigma":self._anton_valence_sigma,
+            "energy":self._anton_energy,"energy_sigma":self._anton_energy_sigma,
+            "baseline_valence":self._anton_baseline_valence,"baseline_energy":self._anton_baseline_energy,
+            "below_baseline_since":self._epoch_to_iso(self._anton_below_baseline_since),
+            "last_observation_at":self._epoch_to_iso(self._anton_last_observation)})
+
+    @staticmethod
+    def _shadow_record(kind: str, state: dict) -> ActorRecord:
+        return ActorRecord(f"{config.INSTANCE}:{kind}", kind, config.INSTANCE, 0, state, {},
+                           Disposition.READY_AGAIN, dirty=True)
+
+    def _compare_shadow_tick(self, before: dict, event) -> None:
+        result = AxonActor().transition(self._shadow_record("axon", before), [event],
+            TransitionContext("shadow", datetime.now(timezone.utc)))
+        compare_numeric("axon interaction tick", self._shadow_alive_state(), result.state,
+            ("tick","valence","valence_sigma","arousal","arousal_sigma","tension","background_affect"))
+
+    def _compare_shadow_response(self, alive_before: dict, anton_before: dict, events: list) -> None:
+        now = datetime.now(timezone.utc); context = TransitionContext("shadow", now)
+        anton_events = [e for e in events if e.event_type == "anton_state_observed"]
+        empathy = []
+        if anton_events:
+            anton_result = AntonActor().transition(self._shadow_record("anton", anton_before), anton_events, context)
+            empathy = anton_result.emitted_events
+            compare_numeric("anton response fold", self._shadow_anton_state(), anton_result.state,
+                ("valence","valence_sigma","energy","energy_sigma","baseline_valence","baseline_energy"))
+        axon_events = [e for e in events if e.event_type in
+            {"affect_tag_emitted","goal_completed","high_confidence_valence_report"}] + empathy
+        if axon_events:
+            axon_result = AxonActor().transition(self._shadow_record("axon", alive_before), axon_events, context)
+            compare_numeric("axon response fold", self._shadow_alive_state(), axon_result.state,
+                ("valence","valence_sigma","arousal","arousal_sigma","tension"))
 
     # ------------------------------------------------------------------
     # Config / system prompt
@@ -916,6 +963,8 @@ class SessionManagerNode:
 
     REFLECTION_PROMPT = (
         "[REFLECTION TICK — no user present; do not address the user; this is idle time]\n"
+        "This is one bounded activation: at most one model turn and one read-only tool batch. "
+        "Do not write files, send messages, or perform any external/consequential action.\n"
         "Core question (framing per Anton, 2026-08-08): how do I better serve Anton's "
         "well-being, productivity, and progress toward his goals — how do I be better "
         "at being his? Analyze him, and analyze yourself in relation to him. Briefly:\n"
@@ -931,15 +980,10 @@ class SessionManagerNode:
         "recurring frictions, things he circles back to). Emit [INSIGHT: ...] for "
         "concrete improvements to how I should operate. Quality over quantity; zero "
         "is fine.\n"
-        "4. Maintain the relationship profile at "
-        "/home/lynnkse/.claude/projects/-home-lynnkse-Axon/memory/anton-interaction-profile.md "
-        "(create if missing, MEMORY.md pointer too): how he communicates per context, "
-        "what register he responds best to, current life rhythm. Real evidence only; "
-        "under 60 lines.\n"
-        "5. If anton_state_log has 14+ days of data and no correlation insight was saved "
+        "4. If the journal has 14+ days of data and no correlation insight was saved "
         "in the last 7 days, compute the anton-valence vs axon_valence correlation "
         "(note lead/lag if visible) and save as [INSIGHT: ...].\n"
-        "6. End with one concrete adjustment to how I operate next week, phrased as a "
+        "5. End with one concrete adjustment to how I operate next week, phrased as a "
         "self-directive.\n"
         "Keep total output compact. Valence/mood tags allowed if reflection genuinely "
         "moved your state."
@@ -971,10 +1015,22 @@ class SessionManagerNode:
                 # Stamp BEFORE enqueueing: generation takes minutes, and a crash
                 # mid-reflection shouldn't cause a retry storm on restart.
                 self._last_reflection_time = now
-                self._save_anton_model()
-                log.info("Reflection tick: enqueueing idle reflection")
-                self.input_queue.put(QueueItem(
-                    text=self.REFLECTION_PROMPT, source="reflection", user_id="system"))
+                if config.ACTOR_RUNTIME_ENABLED:
+                    from actor_model.types import Assignment, Event
+                    request_key = f"{config.INSTANCE}:reflection:{time.time_ns()}"
+                    supabase_client.append_actor_event(Event(
+                        "reflection_requested", config.INSTANCE, "deterministic_clock",
+                        {"idle_hours": (now-self._last_user_msg_time)/3600},
+                        {"idle_gate": self.REFLECTION_IDLE_H, "minimum_gap": self.REFLECTION_MIN_GAP_H},
+                        (Assignment(f"{config.INSTANCE}:reflection", reason="idle window elapsed"),),
+                        request_key).as_payload())
+                if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
+                    self._save_anton_model()
+                log.info("Reflection tick: actor event recorded" if config.ACTOR_RUNTIME_ENABLED
+                         else "Reflection tick: enqueueing legacy reflection")
+                if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
+                    self.input_queue.put(QueueItem(
+                        text=self.REFLECTION_PROMPT, source="reflection", user_id="system"))
             except Exception as e:
                 log.warning(f"Reflection ticker error: {e}")
 
@@ -1001,18 +1057,28 @@ class SessionManagerNode:
             if item.source != "reflection":
                 self._last_user_msg_time = time.time()
 
-            # Advance alive tick on every user message + entropy drift (σ grows without observations)
-            self._alive_tick += 1
-            self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
-            self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
-            # Homeostasis: OU-style mean reversion toward temperament baseline
-            # (see constants above — prevents integrator saturation).
-            self._alive_valence += self.HOMEOSTASIS_RATE * (self.VALENCE_BASELINE - self._alive_valence)
-            self._alive_arousal += self.HOMEOSTASIS_RATE * (self.AROUSAL_BASELINE - self._alive_arousal)
-            # Slow decay of tension toward zero and background_affect toward zero
-            self._alive_tension = max(0.0, self._alive_tension - 0.01)
-            self._alive_background_affect *= 0.98
-            self._save_full_alive_state()
+            actor_interaction = None
+            shadow_tick_before = None
+            if config.ACTOR_RUNTIME_ENABLED:
+                interaction_key = f"{config.INSTANCE}:{item.source}:{item.user_id}:{time.time_ns()}"
+                actor_interaction = interaction_event(
+                    item.text, config.INSTANCE, item.source, item.user_id, interaction_key)
+                supabase_client.append_actor_event(actor_interaction.as_payload())
+                setattr(item, "interaction_key", interaction_key)
+            if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
+                # Legacy fallback during the rollback window.
+                if config.ACTOR_RUNTIME_ENABLED and config.ACTOR_SHADOW_MODE and actor_interaction:
+                    shadow_tick_before = self._shadow_alive_state()
+                self._alive_tick += 1
+                self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
+                self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
+                self._alive_valence += self.HOMEOSTASIS_RATE * (self.VALENCE_BASELINE - self._alive_valence)
+                self._alive_arousal += self.HOMEOSTASIS_RATE * (self.AROUSAL_BASELINE - self._alive_arousal)
+                self._alive_tension = max(0.0, self._alive_tension - 0.01)
+                self._alive_background_affect *= 0.98
+                self._save_full_alive_state()
+                if shadow_tick_before is not None:
+                    self._compare_shadow_tick(shadow_tick_before, actor_interaction)
 
             # If we know the session file, record its current size so we only
             # read entries written AFTER this message. If session_id is unknown
@@ -1042,17 +1108,22 @@ class SessionManagerNode:
                     supabase_client.bump_rule_usage(fired_names)
 
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
-            # Affective loop (2026-08-08): current alive state + derived directives on
-            # every message — the system-prompt block goes stale immediately after spawn.
-            alive_prefix = self._alive_message_prefix()
-            prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
-            message_text = prefix + item.text
-
-            # Inject semantically relevant dreams for real user messages.
+            reflection_context = ""
             if item.source == "telegram":
-                dream_context = supabase_client.fetch_relevant_dreams(item.text)
-                if dream_context:
-                    message_text = dream_context + "\n\n" + message_text
+                reflection_context = supabase_client.fetch_relevant_dreams(item.text)
+            if actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
+                # Read-only composition never waits for actor advancement.
+                due_obligations = supabase_client.fetch_due_obligations(item.source)
+                supabase_client.mark_obligations_presented(due_obligations)
+                message_text = compose_turn(item.text, supabase_client.fetch_actor_states(),
+                    due_obligations, permanent_rules,
+                    relevant_rules, reflection_context)
+            else:
+                alive_prefix = self._alive_message_prefix()
+                prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
+                message_text = prefix + item.text
+                if reflection_context:
+                    message_text = reflection_context + "\n\n" + message_text
 
             # Inject message via PTY.
             # Claude's TUI runs in raw terminal mode: Enter = \r (not \n).
@@ -1102,6 +1173,17 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _publish_response(self, item: QueueItem, response_text: str):
+        actor_events = []
+        shadow_alive_before = shadow_anton_before = None
+        if config.ACTOR_RUNTIME_ENABLED:
+            interaction_key = getattr(item, "interaction_key", f"legacy:{time.time_ns()}")
+            actor_events = response_events(response_text, config.INSTANCE, item.source, interaction_key)
+            for event in actor_events:
+                supabase_client.append_actor_event(event.as_payload())
+            if actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
+                self._publish_clean_response(item, response_text)
+                return
+            shadow_alive_before, shadow_anton_before = self._shadow_alive_state(), self._shadow_anton_state()
         # Parse alive tags before stripping
         import re as _re
         _changed = False
@@ -1199,8 +1281,17 @@ class SessionManagerNode:
                 f"mood={self._alive_mood}"
             )
 
-        # Parse memory tags, save to Supabase, strip tags from delivered text
-        clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
+        if shadow_alive_before is not None and shadow_anton_before is not None:
+            self._compare_shadow_response(shadow_alive_before, shadow_anton_before, actor_events)
+
+        self._publish_clean_response(item, response_text)
+
+    def _publish_clean_response(self, item: QueueItem, response_text: str):
+        """Persist/strip generic tags and publish; contains no actor transition work."""
+        clean_text = (supabase_client.strip_response_tags(response_text) if
+                      actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE)
+                      and item.source == "reflection" else
+                      supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL))
         supabase_client.save_message(
             role="assistant",
             content=clean_text,

@@ -1,7 +1,7 @@
 #!/bin/bash
 # start_axon.sh — bring up / restart the full Axon stack
 #
-# 5 tmux sessions: manager | telegram | cli | curator | web
+# manager | actor (when enabled) | telegram | cli | curator | web
 #
 # Logic per session:
 #   - Already exists → leave it open, kill what's running, restart the process
@@ -76,9 +76,13 @@ start_in_session cli \
 start_in_session curator \
     "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
 
-# ── 5. ralph — autonomous execution agent ─────────────────────────────────────
-start_in_session ralph \
-    "cd '$AXON_DIR' && $PYTHON -u ralph_node.py 2>&1 | tee '$LOG_DIR/ralph.log'"
+# ── 5. actor runtime — bounded persistent actor advancement ───────────────────
+if [[ "${AXON_ACTORS:-0}" =~ ^(1|true|yes)$ ]]; then
+    start_in_session actor \
+        "cd '$AXON_DIR' && $PYTHON -u actor_runtime.py 2>&1 | tee '$LOG_DIR/actor.log'"
+else
+    echo "Actor runtime disabled (set AXON_ACTORS=1 after schema/backfill)."
+fi
 
 # ── 6. web — Streamlit dashboard + ttyd CLI stream ───────────────────────────
 # Both background processes are managed here; pane shows their combined status.
@@ -91,11 +95,8 @@ nohup $STREAMLIT run '$AXON_DIR/dashboard/app.py' \\
   --server.headless true --browser.gatherUsageStats false \\
   > '$DASH_LOG_DIR/streamlit.log' 2>&1 &
 /usr/bin/tmux new-session -d -s browser_view -t cli 2>/dev/null || true
-/usr/bin/tmux new-session -d -s ralph_view   -t ralph 2>/dev/null || true
 [[ -x '$TTYD' ]] && nohup '$TTYD' --port 7681 --interface 0.0.0.0 --writable \\
   /usr/bin/tmux attach-session -t browser_view > '$DASH_LOG_DIR/ttyd.log' 2>&1 &
-[[ -x '$TTYD' ]] && nohup '$TTYD' --port 7682 --interface 0.0.0.0 --writable \\
-  /usr/bin/tmux attach-session -t ralph_view > '$DASH_LOG_DIR/ttyd_ralph.log' 2>&1 &
 echo 'Dashboard: http://$TAILSCALE_IP:8501  |  CLI stream: http://$TAILSCALE_IP:7681'
 tail -f '$DASH_LOG_DIR/streamlit.log'
 WEBCMD
@@ -109,7 +110,7 @@ echo "╔═══════════════════════�
 echo "║           Axon stack is running              ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Sessions:   manager | telegram | cli         ║"
-echo "║              curator | ralph | web           ║"
+echo "║              curator | actor* | web          ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Dashboard:  http://$TAILSCALE_IP:8501"
 echo "║  CLI stream: http://$TAILSCALE_IP:7681"

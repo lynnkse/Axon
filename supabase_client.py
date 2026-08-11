@@ -55,6 +55,11 @@ _ALL_TAGS_RE = re.compile(
 )
 
 
+def strip_response_tags(text: str) -> str:
+    """Remove protocol tags without executing any persistence side effects."""
+    return _ALL_TAGS_RE.sub("", text).strip()
+
+
 # ------------------------------------------------------------------
 # HTTP helpers
 # ------------------------------------------------------------------
@@ -93,18 +98,9 @@ def _rest_patch(table: str, filters: str, payload: dict) -> bool:
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         return False
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}?{filters}"
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="PATCH",
-        headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal",
-        },
-    )
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="PATCH", headers={
+        "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "Content-Type": "application/json", "Prefer": "return=minimal"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status in (200, 201, 204)
@@ -115,6 +111,104 @@ def _rest_patch(table: str, filters: str, payload: dict) -> bool:
     except Exception as e:
         log.warning(f"Supabase patch {table} error: {e}")
         return False
+
+
+def _rest_get(path: str, timeout: int = 10):
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return []
+    req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
+        "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"Supabase GET {path} failed: {e}")
+        return []
+
+
+def _rpc(name: str, payload: dict, timeout: int = 15):
+    """Synchronous RPC for actor operations whose result controls correctness."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return None
+    req = urllib.request.Request(
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rpc/{name}",
+        data=json.dumps(payload).encode(), method="POST", headers={
+            "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "Content-Type": "application/json", "Prefer": "return=representation"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode()
+            return json.loads(body) if body else True
+    except Exception as e:
+        log.warning(f"Supabase RPC {name} failed: {e}")
+        return None
+
+
+def append_actor_event(event: dict):
+    return _rpc("append_event", {"p_event": event})
+
+
+def fetch_actor_states() -> list[dict]:
+    return _rest_get(f"actor_state?instance=eq.{urllib.parse.quote(config.INSTANCE)}&order=actor_id.asc")
+
+
+def fetch_actor_events(actor_id: str, after_sequence: int = 0) -> list[dict]:
+    assignment = urllib.parse.quote(json.dumps([{"actor_id": actor_id}], separators=(",", ":")))
+    return _rest_get(
+        f"events?sequence=gt.{after_sequence}&assignments=cs.{assignment}&order=sequence.asc&limit=500")
+
+
+def acquire_actor_lease(actor_id: str, revision: int, owner: str, activation_id: str):
+    return _rpc("acquire_actor_lease", {"p_actor_id": actor_id, "p_revision": revision,
+        "p_owner": owner, "p_activation_id": activation_id, "p_ttl_seconds": config.ACTOR_LEASE_SECONDS})
+
+
+def renew_actor_lease(actor_id: str, owner: str, activation_id: str):
+    return bool(_rpc("renew_actor_lease", {"p_actor_id": actor_id, "p_owner": owner,
+        "p_activation_id": activation_id, "p_ttl_seconds": config.ACTOR_LEASE_SECONDS}))
+
+
+def release_actor_lease(actor_id: str, owner: str, activation_id: str) -> bool:
+    return bool(_rpc("release_actor_lease", {"p_actor_id": actor_id, "p_owner": owner,
+        "p_activation_id": activation_id}))
+
+
+def commit_actor_transition(actor_id: str, revision: int, owner: str, activation_id: str,
+                            state: dict, directory: dict, disposition: str,
+                            last_sequence: int, emitted: list[dict]):
+    return _rpc("commit_actor_transition", {"p_actor_id": actor_id, "p_expected_revision": revision,
+        "p_owner": owner, "p_activation_id": activation_id, "p_state": state,
+        "p_directory": directory, "p_disposition": disposition,
+        "p_last_sequence": last_sequence, "p_emitted": emitted})
+
+
+def fetch_due_obligations(source: str = "telegram") -> list[dict]:
+    rows = _rest_get("obligations?status=eq.open&order=due_at.asc.nullslast")
+    from actor_model.obligations import eligible
+    return [r for r in rows if eligible(r, interaction={"source": source})]
+
+
+def mark_obligations_presented(rows: list[dict]) -> bool:
+    ids = [row["id"] for row in rows if row.get("id")]
+    return not ids or bool(_rpc("present_obligations", {"p_ids": ids}))
+
+
+def save_actor_schedule(actor_id: str, revision: int, virtual_deadline: float,
+                        service_debt: float, nice_weight: float) -> bool:
+    return _rest_patch("actor_state", f"actor_id=eq.{urllib.parse.quote(actor_id)}&revision=eq.{revision}", {
+        "virtual_deadline": virtual_deadline, "service_debt": service_debt, "nice_weight": nice_weight})
+
+
+def upsert_actor_seed(row: dict) -> bool:
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY: return False
+    req=urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/actor_state",
+        data=json.dumps(row).encode(),method="POST",headers={"apikey":config.SUPABASE_ANON_KEY,
+        "Authorization":f"Bearer {config.SUPABASE_ANON_KEY}","Content-Type":"application/json",
+        "Prefer":"resolution=ignore-duplicates,return=minimal"})
+    try:
+        with urllib.request.urlopen(req,timeout=10): return True
+    except Exception as e:
+        log.warning(f"actor seed failed: {e}"); return False
 
 
 def _fire(fn, *args):
