@@ -125,16 +125,282 @@ div[data-testid="stExpander"] { border-radius: 10px; }
 /* Make iframes fill their column */
 iframe { width: 100% !important; }
 
+/* ── Axon design system ─────────────────────────────────────────────────── */
+:root {
+  --axon-bg: #0b0e14;
+  --axon-surface: rgba(18,23,32,0.94);
+  --axon-surface-raised: #151b25;
+  --axon-text: #edf2fa;
+  --axon-muted: #a1adbd;
+  --axon-faint: #748094;
+  --axon-line: rgba(169,184,207,0.12);
+  --axon-line-strong: rgba(169,184,207,0.22);
+  --axon-accent: #8b8cff;
+  --axon-accent-bright: #a9aaff;
+  --axon-accent-soft: rgba(139,140,255,0.12);
+  --axon-cyan: #64d8ec;
+  --axon-green: #4dd4a7;
+  --axon-radius: 12px;
+  --axon-shadow: 0 1px 0 rgba(255,255,255,.025) inset, 0 12px 36px rgba(0,0,0,.18);
+}
+
+html, body, [class*="css"], .stApp {
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--axon-text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.stApp { background: var(--axon-bg); }
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(circle at 12% -10%, rgba(98,96,255,.105), transparent 32rem),
+    radial-gradient(circle at 92% 8%, rgba(55,188,218,.055), transparent 30rem),
+    var(--axon-bg);
+}
+[data-testid="stDecoration"], [data-testid="stToolbar"], #MainMenu { display: none !important; }
+.block-container {
+  max-width: 1440px !important;
+  padding: 1.25rem 2rem 3.5rem !important;
+}
+
+/* Brand masthead */
+.axon-masthead {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  min-height: 56px; margin: 0 0 8px; padding: 2px 2px 10px;
+}
+.axon-wordmark { display: flex; align-items: center; gap: 11px; }
+.axon-mark {
+  width: 36px; height: 36px; display: grid; place-items: center;
+  color: #fff; background: linear-gradient(145deg, #8b8cff, #5557d8);
+  border: 1px solid rgba(196,197,255,.35); border-radius: 10px;
+  box-shadow: 0 0 22px rgba(117,118,255,.30), 0 6px 16px rgba(0,0,0,.28);
+  font-size: 17px;
+}
+.axon-title { font-size: 19px; line-height: 1.15; font-weight: 760; letter-spacing: -0.025em; }
+.axon-kicker {
+  color: var(--axon-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; margin-top: 3px; letter-spacing: .035em;
+}
+.axon-instance {
+  display: inline-flex; align-items: center; gap: 8px; padding: 7px 11px;
+  color: #c6cfdb; background: rgba(20,26,36,.85); border: 1px solid var(--axon-line-strong);
+  border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; font-weight: 750; letter-spacing: .09em;
+  box-shadow: 0 0 18px rgba(100,216,236,.055);
+}
+.axon-instance-dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 3px rgba(77,212,167,.10), 0 0 10px currentColor; }
+
+/* Navigation: quiet segmented control, including nested architecture tabs */
+.stTabs [data-baseweb="tab-list"] {
+  width: fit-content; max-width: 100%; gap: 3px; padding: 4px;
+  background: rgba(14,18,26,.82); border: 1px solid var(--axon-line);
+  border-radius: 11px; box-shadow: 0 8px 28px rgba(0,0,0,.16), inset 0 1px rgba(255,255,255,.018);
+  overflow-x: auto; scrollbar-width: none;
+}
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar { display: none; }
+.stTabs [data-baseweb="tab"] {
+  min-height: 39px; padding: 8px 14px; border-radius: 8px;
+  color: var(--axon-muted); font-size: 14px; font-weight: 560;
+  letter-spacing: -0.005em; white-space: nowrap;
+  transition: color .16s ease, background-color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+.stTabs [data-baseweb="tab"]:hover { color: var(--axon-text); background: rgba(139,140,255,.075); }
+.stTabs [aria-selected="true"] {
+  color: #fff !important; background: rgba(139,140,255,.14) !important; font-weight: 700;
+  box-shadow: inset 0 0 0 1px rgba(169,170,255,.20), 0 0 18px rgba(116,117,255,.09);
+}
+.stTabs [data-baseweb="tab-highlight"] { display: none; }
+.stTabs [data-baseweb="tab-panel"] { padding-top: 1.75rem; }
+
+/* Type scale */
+h1, h2, h3, h4, h5, h6 { color: var(--axon-text); letter-spacing: -0.025em; }
+h2 { font-size: 1.72rem !important; line-height: 1.2 !important; font-weight: 760 !important; margin-bottom: .45rem !important; }
+h3 { font-size: 1.34rem !important; line-height: 1.3 !important; font-weight: 720 !important; }
+h4 { font-size: 1.13rem !important; font-weight: 690 !important; }
+h5, h6 {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1rem !important;
+  font-weight: 680 !important; letter-spacing: .01em;
+}
+p, li, [data-testid="stMarkdownContainer"] { font-size: 15.5px; line-height: 1.62; }
+[data-testid="stCaptionContainer"] { color: var(--axon-muted); font-size: 13px; font-weight: 450; }
+hr { border: 0 !important; border-top: 1px solid var(--axon-line) !important; margin: 1rem 0 !important; }
+
+/* Metrics and cards */
+div[data-testid="stMetric"] {
+  min-height: 92px; padding: 15px 17px;
+  background: var(--axon-surface); border: 1px solid var(--axon-line);
+  border-radius: var(--axon-radius); box-shadow: var(--axon-shadow);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+div[data-testid="stMetric"]:hover {
+  transform: translateY(-1px); border-color: var(--axon-line-strong);
+  box-shadow: 0 0 0 1px rgba(139,140,255,.08), 0 0 24px rgba(112,113,255,.075), 0 14px 32px rgba(0,0,0,.22);
+}
+[data-testid="stMetricLabel"] {
+  color: var(--axon-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; font-weight: 650; letter-spacing: .045em;
+}
+[data-testid="stMetricValue"] { color: var(--axon-text); font-size: 1.72rem; font-weight: 760; letter-spacing: -.04em; }
+[data-testid="stMetricDelta"] { font-size: 12px; font-weight: 560; }
+
+div[data-testid="stExpander"] {
+  margin: 0 0 10px; overflow: hidden; background: var(--axon-surface);
+  border: 1px solid var(--axon-line) !important; border-radius: var(--axon-radius) !important;
+  box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 8px 24px rgba(0,0,0,.12);
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+div[data-testid="stExpander"]:hover {
+  border-color: var(--axon-line-strong) !important;
+  box-shadow: 0 0 22px rgba(112,113,255,.065), 0 12px 28px rgba(0,0,0,.18);
+}
+div[data-testid="stExpander"] details > summary {
+  min-height: 54px; padding: 5px 10px; color: #dce4ef; font-size: 14.5px; font-weight: 650;
+}
+div[data-testid="stExpander"] details > summary:hover { color: var(--axon-accent); }
+div[data-testid="stExpander"] details[open] > summary { border-bottom: 1px solid var(--axon-line); }
+div[data-testid="stExpanderDetails"] { padding: 14px 16px 16px; }
+
+.memory-block {
+  background: linear-gradient(135deg, rgba(139,140,255,.10), rgba(19,25,35,.82));
+  border: 1px solid rgba(151,152,255,.20); border-left: 2px solid var(--axon-accent);
+  border-radius: 10px; padding: 13px 15px; margin: 1px 0 14px;
+  box-shadow: inset 0 1px rgba(255,255,255,.018), 0 0 24px rgba(112,113,255,.045); line-height: 1.6;
+}
+.project-block {
+  background: linear-gradient(135deg, rgba(77,212,167,.075), rgba(19,25,35,.82));
+  border-color: rgba(77,212,167,.18); border-left-color: var(--axon-green);
+  box-shadow: inset 0 1px rgba(255,255,255,.018), 0 0 24px rgba(77,212,167,.035);
+}
+.project-stages {
+  display: flex; align-items: flex-start; width: 100%; overflow-x: auto;
+  padding: 11px 4px 17px; margin: 2px 0 15px;
+}
+.project-stage {
+  position: relative; flex: 1 0 120px; min-width: 120px; text-align: center;
+  color: var(--axon-faint);
+}
+.project-stage:not(:last-child)::after {
+  content: ""; position: absolute; z-index: 0; top: 15px; left: calc(50% + 17px);
+  width: calc(100% - 34px); height: 1px; background: rgba(169,184,207,.20);
+}
+.project-stage.done:not(:last-child)::after {
+  background: linear-gradient(90deg, var(--axon-green), rgba(77,212,167,.42));
+  box-shadow: 0 0 9px rgba(77,212,167,.20);
+}
+.project-stage-node {
+  position: relative; z-index: 1; display: grid; place-items: center;
+  width: 31px; height: 31px; margin: 0 auto 8px; border-radius: 50%;
+  border: 1px solid rgba(169,184,207,.25); background: #111721;
+  color: var(--axon-faint); font: 750 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.project-stage.done .project-stage-node {
+  color: #07140f; border-color: var(--axon-green); background: var(--axon-green);
+  box-shadow: 0 0 15px rgba(77,212,167,.28);
+}
+.project-stage.in-progress .project-stage-node {
+  color: white; border-color: var(--axon-accent-bright); background: var(--axon-accent);
+  box-shadow: 0 0 0 4px rgba(139,140,255,.10), 0 0 19px rgba(139,140,255,.38);
+  animation: axon-stage-pulse 2.2s ease-in-out infinite;
+}
+.project-stage-name {
+  color: #8792a4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; font-weight: 620; line-height: 1.35;
+}
+.project-stage.done .project-stage-name { color: #b5e9d7; }
+.project-stage.in-progress .project-stage-name { color: #dadaff; font-weight: 760; }
+@keyframes axon-stage-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(139,140,255,.08), 0 0 15px rgba(139,140,255,.28); }
+  50% { box-shadow: 0 0 0 6px rgba(139,140,255,.14), 0 0 25px rgba(139,140,255,.48); }
+}
+.axon-badge {
+  padding: 4px 9px; border: 1px solid rgba(255,255,255,.13); border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  font-weight: 720; letter-spacing: .055em; text-transform: uppercase; box-shadow: 0 0 12px rgba(139,140,255,.09);
+}
+.memory-id { margin: 10px 0 4px; color: #d4dce8; font-size: 13px; }
+.memory-meta { color: var(--axon-muted); font-size: 13px; margin-top: 7px; }
+.insight-label-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 8px;
+}
+.insight-label {
+  display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px;
+  color: #dadaff; background: rgba(139,140,255,.10); border: 1px solid rgba(169,170,255,.20);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px;
+  font-weight: 720; letter-spacing: .055em; text-transform: uppercase;
+}
+.insight-label.secondary {
+  color: var(--axon-muted); background: rgba(169,184,207,.045); border-color: var(--axon-line);
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+  margin: 0 0 13px; padding: 14px 16px !important;
+  background: linear-gradient(135deg, rgba(139,140,255,.065), rgba(18,23,32,.88));
+  border: 1px solid rgba(151,152,255,.16) !important; border-left: 2px solid var(--axon-accent) !important;
+  border-radius: 10px !important;
+  box-shadow: inset 0 1px rgba(255,255,255,.018), 0 0 22px rgba(112,113,255,.035);
+}
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p:last-child { margin-bottom: 0; }
+
+/* Data, plots and media */
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+  overflow: hidden; border: 1px solid var(--axon-line); border-radius: var(--axon-radius);
+  background: var(--axon-surface-raised); box-shadow: 0 10px 28px rgba(0,0,0,.14);
+  --gdg-bg-cell: #131923; --gdg-bg-header: #171e29; --gdg-text-dark: #e6edf7;
+  --gdg-border-color: rgba(169,184,207,.12); font-size: 14px;
+}
+[data-testid="stPlotlyChart"], [data-testid="stGraphVizChart"] {
+  padding: 10px; background: rgba(18,23,32,.86); border: 1px solid var(--axon-line);
+  border-radius: var(--axon-radius); box-shadow: 0 10px 28px rgba(0,0,0,.14);
+}
+[data-testid="stJson"] { border: 1px solid var(--axon-line); border-radius: 10px; overflow: hidden; font-size: 13px; }
+video, iframe { border-radius: var(--axon-radius); border: 1px solid var(--axon-line); background: #10151d; }
+
+/* Controls and feedback */
+.stButton > button, .stDownloadButton > button {
+  min-height: 40px; padding: 8px 14px; color: #dce4ef; background: #151b25;
+  border: 1px solid var(--axon-line-strong); border-radius: 9px;
+  font-size: 13.5px; font-weight: 680; box-shadow: 0 5px 16px rgba(0,0,0,.14);
+  transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease, color .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  color: var(--axon-accent-bright); border-color: rgba(139,140,255,.48);
+  box-shadow: 0 0 20px rgba(112,113,255,.12), 0 8px 18px rgba(0,0,0,.20); transform: translateY(-1px);
+}
+.stButton > button:active, .stDownloadButton > button:active { transform: translateY(0); box-shadow: none; }
+[data-baseweb="select"] > div, [data-baseweb="input"] > div, textarea {
+  color: var(--axon-text) !important; background: #131923 !important;
+  border-color: var(--axon-line-strong) !important; border-radius: 9px !important; font-size: 14px !important;
+}
+[data-testid="stAlert"] { border: 1px solid var(--axon-line); border-radius: 10px; box-shadow: none; }
+.split-label {
+  color: var(--axon-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; font-weight: 720; letter-spacing: .09em; text-transform: uppercase;
+}
+
+/* Polished scrollbars */
+* { scrollbar-width: thin; scrollbar-color: #394457 transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #394457; border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background-color: #536077; }
+
 /* ── Mobile responsiveness (phones/small tablets) ───────────────────────── */
 @media (max-width: 640px) {
-  .block-container { padding: 0.4rem 0.6rem 0 0.6rem !important; }
+  .block-container { padding: .7rem .75rem 2rem !important; }
+  .axon-masthead { min-height: 46px; margin-bottom: 4px; }
+  .axon-kicker { display: none; }
   /* Streamlit column layouts wrap by default via flex-wrap below; this just
      tightens spacing so wrapped columns don't look sparse */
   div[data-testid="column"] { min-width: 100% !important; }
   div[data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
-  .stTabs [data-baseweb="tab"] { padding: 8px 10px; font-size: 0.85rem; }
-  h1, h2, h3 { font-size: 1.1rem !important; }
-  h4, h5 { font-size: 1rem !important; }
+  .stTabs [data-baseweb="tab-list"] { flex-wrap: nowrap; width: 100%; }
+  .stTabs [data-baseweb="tab"] { padding: 7px 11px; font-size: 13px; }
+  .stTabs [data-baseweb="tab-panel"] { padding-top: 1.2rem; }
+  h2 { font-size: 1.45rem !important; }
+  h3 { font-size: 1.22rem !important; }
+  h4, h5 { font-size: 1.05rem !important; }
+  div[data-testid="stMetric"] { min-height: 82px; padding: 12px 13px; }
+  .project-stage { flex-basis: 105px; min-width: 105px; }
+  .project-stage-name { font-size: 11px; }
   /* Graphviz/plotly charts: allow horizontal scroll instead of illegible squish */
   div[data-testid="stGraphVizChart"], .js-plotly-plot {
     overflow-x: auto !important; max-width: 100% !important;
@@ -145,14 +411,17 @@ iframe { width: 100% !important; }
 
 _instance_color = {"rog": "#4A90D9", "aevadim09": "#D97A4A"}.get(AXON_INSTANCE, "#888")
 st.markdown(
-    f"##### ⚡ Axon Dashboard &nbsp; "
-    f'<span style="background:{_instance_color}; color:white; padding:2px 10px; '
-    f'border-radius:10px; font-size:0.7em; vertical-align:middle;">{AXON_INSTANCE.upper()}</span>',
+    '<div class="axon-masthead">'
+    '<div class="axon-wordmark"><div class="axon-mark">⚡</div><div>'
+    '<div class="axon-title">Axon</div><div class="axon-kicker">Executive intelligence dashboard</div>'
+    '</div></div>'
+    f'<div class="axon-instance"><span class="axon-instance-dot" style="background:{_instance_color}"></span>'
+    f'{html.escape(AXON_INSTANCE.upper())}</div></div>',
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_actors, tab_projects, tab_architecture, tab_files, tab_split, tab_manim = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "⚡ Split View", "🎬 Manim"]
+tab_food, tab_fitness, tab_alive, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database"]
 )
 
 MANIM_OUTPUT = Path.home() / "Axon/manim/output"
@@ -363,7 +632,7 @@ with tab_projects:
     st.caption("Anton's current work areas as cognitive threads. Open a project to inspect its recent accumulated insight history.")
     projects = _sb_get(
         "projects",
-        "order=status.asc,name.asc&select=id,name,status,domain,description,started_at",
+        "order=status.asc,name.asc&select=id,name,status,domain,description,started_at,metadata",
     )
     if projects:
         status_colors = {
@@ -388,6 +657,29 @@ with tab_projects:
                     unsafe_allow_html=True,
                 )
 
+                stages = (project.get("metadata") or {}).get("stages")
+                if isinstance(stages, list):
+                    stage_blocks = []
+                    for index, stage in enumerate(stages):
+                        if not isinstance(stage, dict):
+                            continue
+                        stage_status = stage.get("status", "planned")
+                        status_class = "in-progress" if stage_status == "in_progress" else (
+                            "done" if stage_status == "done" else "planned"
+                        )
+                        marker = "✓" if stage_status == "done" else str(index + 1)
+                        stage_blocks.append(
+                            f'<div class="project-stage {status_class}">'
+                            f'<div class="project-stage-node">{html.escape(marker)}</div>'
+                            f'<div class="project-stage-name">{html.escape(str(stage.get("name") or f"Stage {index + 1}"))}</div>'
+                            '</div>'
+                        )
+                    if stage_blocks:
+                        st.markdown(
+                            '<div class="project-stages">' + "".join(stage_blocks) + '</div>',
+                            unsafe_allow_html=True,
+                        )
+
                 insights = _sb_get(
                     "insights",
                     f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=created_at.desc&limit=50"
@@ -398,14 +690,23 @@ with tab_projects:
                     for insight in insights:
                         insight_type = insight.get("type") or "insight"
                         confidence = insight.get("confidence")
-                        heading = f"{insight_type} · {insight.get('created_at') or 'unknown date'}"
-                        if confidence is not None:
-                            heading += f" · confidence {confidence}"
-                        st.markdown(f"**{heading}**")
-                        st.write(insight.get("content") or "")
-                        if insight.get("context"):
-                            st.caption(f"Context: {insight['context']}")
-                        st.markdown("---")
+                        with st.container(border=True):
+                            labels = (
+                                f'<div class="insight-label-row">'
+                                f'<span class="insight-label">{html.escape(str(insight_type))}</span>'
+                                f'<span class="insight-label secondary">'
+                                f'{html.escape(str(insight.get("created_at") or "unknown date"))}</span>'
+                            )
+                            if confidence is not None:
+                                labels += (
+                                    f'<span class="insight-label secondary">confidence '
+                                    f'{html.escape(str(confidence))}</span>'
+                                )
+                            labels += '</div>'
+                            st.markdown(labels, unsafe_allow_html=True)
+                            st.markdown(insight.get("content") or "")
+                            if insight.get("context"):
+                                st.caption(f"Context: {insight['context']}")
                 else:
                     st.caption("No linked insights yet.")
     else:
@@ -731,54 +1032,7 @@ with tab_files:
     else:
         st.info("No files found in ~/Axon/")
 
-# ── Tab: Split View ───────────────────────────────────────────────────────────
-with tab_split:
-    # Multi-machine fix (2026-08-09): this was hardcoded to ROG's Tailscale IP,
-    # so opening the dashboard on ANY machine embedded ROG's ttyd streams --
-    # the outer Streamlit page was local, but the CLI/RALPH terminal iframes
-    # silently pointed cross-machine at ROG regardless of which instance served
-    # the page. Detect the local machine's own IP instead, same pattern as
-    # start_axon.sh's TAILSCALE_IP detection.
-    import subprocess as _subprocess
-    try:
-        TAILSCALE_IP = _subprocess.run(
-            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3
-        ).stdout.strip() or "127.0.0.1"
-    except Exception:
-        TAILSCALE_IP = "127.0.0.1"
-    PANE_H = 820
-
-    # Left pane selector
-    LEFT_OPTIONS = {"CLI (manager/cli)": 7681, "RALPH": 7682}
-    RIGHT_OPTIONS = {"RALPH": 7682, "CLI (manager/cli)": 7681}
-
-    ctrl_l, ctrl_r = st.columns(2, gap="small")
-    with ctrl_l:
-        left_choice = st.selectbox("Left pane", list(LEFT_OPTIONS.keys()), key="split_left", label_visibility="collapsed")
-    with ctrl_r:
-        right_choice = st.selectbox("Right pane", list(RIGHT_OPTIONS.keys()), key="split_right", label_visibility="collapsed")
-
-    col_cli, col_viewer = st.columns(2, gap="small")
-
-    with col_cli:
-        st.markdown(f'<p class="split-label">{left_choice}</p>', unsafe_allow_html=True)
-        st.components.v1.html(
-            f'<iframe src="http://{TAILSCALE_IP}:{LEFT_OPTIONS[left_choice]}" '
-            f'style="width:100%;height:{PANE_H}px;border:none;" '
-            f'allow="clipboard-write; clipboard-read"></iframe>',
-            height=PANE_H,
-            scrolling=False,
-        )
-
-    with col_viewer:
-        st.markdown(f'<p class="split-label">{right_choice}</p>', unsafe_allow_html=True)
-        st.components.v1.html(
-            f'<iframe src="http://{TAILSCALE_IP}:{RIGHT_OPTIONS[right_choice]}" '
-            f'style="width:100%;height:{PANE_H}px;border:none;" '
-            f'allow="clipboard-write; clipboard-read"></iframe>',
-            height=PANE_H,
-            scrolling=False,
-        )
+# Split View tab disabled 2026-08-12 at Anton's request (interfered with CLI reading).
 
 # ── Tab: Manim ────────────────────────────────────────────────────────────────
 with tab_manim:
@@ -818,3 +1072,197 @@ with tab_manim:
             st.video(str(chosen_path))
         else:
             st.info("Select a clip on the left to play it here.")
+
+# ── Tab: Database / Schema Overview ──────────────────────────────────────────
+with tab_database:
+    st.subheader("Database / Schema Overview")
+    st.caption(
+        "Manually refreshed Supabase schema snapshot · 2026-08-12. "
+        "Only real foreign-key constraints are drawn; unconnected tables are intentionally standalone."
+    )
+    schema_core, schema_life, schema_knowledge = st.tabs(
+        ["Core + actors + work", "Personal life", "Study + research"]
+    )
+
+    with schema_core:
+        st.graphviz_chart(r'''
+digraph schema_core {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.65, ranksep=0.8,
+         fontname="Arial", label="CORE, ACTORS & WORK", labelloc=t, fontsize=20, fontcolor="#A9AAFF"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#64D8EC", penwidth=2.2, arrowsize=0.85, fontname="Courier New", fontsize=9, fontcolor="#A8DCE7"];
+
+  core [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#7779E8" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>AXON CORE / AFFECT</B></FONT></TD></TR>
+      <TR><TD PORT="alive_state"><FONT COLOR="#E8ECF5">alive_state</FONT></TD></TR>
+      <TR><TD PORT="anton_model"><FONT COLOR="#E8ECF5">anton_model</FONT></TD></TR>
+      <TR><TD PORT="anton_state_log"><FONT COLOR="#E8ECF5">anton_state_log</FONT></TD></TR>
+      <TR><TD PORT="memory"><FONT COLOR="#E8ECF5">memory</FONT></TD></TR>
+      <TR><TD PORT="messages"><FONT COLOR="#E8ECF5">messages</FONT></TD></TR>
+      <TR><TD PORT="dreams"><FONT COLOR="#E8ECF5">dreams</FONT></TD></TR>
+      <TR><TD PORT="insights"><FONT COLOR="#E8ECF5">insights</FONT></TD></TR>
+      <TR><TD PORT="rules"><FONT COLOR="#E8ECF5">rules</FONT></TD></TR>
+      <TR><TD PORT="agent_identity"><FONT COLOR="#E8ECF5">agent_identity</FONT></TD></TR>
+      <TR><TD PORT="agent_instructions"><FONT COLOR="#E8ECF5">agent_instructions</FONT></TD></TR>
+      <TR><TD PORT="architecture"><FONT COLOR="#E8ECF5">architecture</FONT></TD></TR>
+      <TR><TD PORT="summaries"><FONT COLOR="#E8ECF5">summaries</FONT></TD></TR>
+      <TR><TD PORT="logs"><FONT COLOR="#E8ECF5">logs</FONT></TD></TR>
+      <TR><TD PORT="operation_policies"><FONT COLOR="#E8ECF5">operation_policies</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  actors [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#9A7BE8" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#6B4FA4"><FONT COLOR="white"><B>ACTOR MODEL</B></FONT></TD></TR>
+      <TR><TD PORT="actor_state"><FONT COLOR="#E8ECF5">actor_state</FONT></TD></TR>
+      <TR><TD PORT="events"><FONT COLOR="#E8ECF5">events</FONT></TD></TR>
+      <TR><TD PORT="leases"><FONT COLOR="#E8ECF5">leases</FONT></TD></TR>
+      <TR><TD PORT="obligations"><FONT COLOR="#E8ECF5">obligations</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  work [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#4DD4A7" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#217A63"><FONT COLOR="white"><B>PROJECTS / TASKS</B></FONT></TD></TR>
+      <TR><TD PORT="projects"><FONT COLOR="#E8ECF5">projects</FONT></TD></TR>
+      <TR><TD PORT="personal_tasks"><FONT COLOR="#E8ECF5">personal_tasks</FONT></TD></TR>
+      <TR><TD PORT="task_actions"><FONT COLOR="#E8ECF5">task_actions</FONT></TD></TR>
+      <TR><TD PORT="roadmap"><FONT COLOR="#E8ECF5">roadmap</FONT></TD></TR>
+      <TR><TD PORT="personal_goals"><FONT COLOR="#E8ECF5">personal_goals</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  standalone [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#56657A" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#344052"><FONT COLOR="white"><B>STANDALONE</B></FONT></TD></TR>
+      <TR><TD PORT="job_search"><FONT COLOR="#E8ECF5">job_search</FONT></TD></TR>
+      <TR><TD PORT="documents"><FONT COLOR="#E8ECF5">documents</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  actors:leases:w -> actors:actor_state:w [label=" actor_id → actor_id", constraint=false];
+  actors:obligations:w -> actors:actor_state:w [label=" owner_actor_id → actor_id", constraint=false];
+  core:insights:e -> work:projects:w [label=" project_id → id"];
+  work:personal_tasks:e -> work:personal_tasks:e [label=" parent_id → id", constraint=false];
+  work:task_actions:w -> work:personal_tasks:w [label=" task_id → id", constraint=false];
+  actors -> work [style=invis, weight=2];
+  work -> standalone [style=invis, weight=2];
+}
+''', use_container_width=True)
+
+    with schema_life:
+        st.graphviz_chart(r'''
+digraph schema_life {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.65, ranksep=0.8,
+         fontname="Arial", label="PERSONAL LIFE & TRACKING", labelloc=t, fontsize=20, fontcolor="#64D8EC"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#64D8EC", penwidth=2.2, arrowsize=0.85, fontname="Courier New", fontsize=9, fontcolor="#A8DCE7"];
+
+  fitness [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#4DD4A7" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#217A63"><FONT COLOR="white"><B>FITNESS / FOOD</B></FONT></TD></TR>
+      <TR><TD PORT="fitness_log"><FONT COLOR="#E8ECF5">fitness_log</FONT></TD></TR>
+      <TR><TD PORT="food_entries"><FONT COLOR="#E8ECF5">food_entries</FONT></TD></TR>
+      <TR><TD PORT="frequent_foods"><FONT COLOR="#E8ECF5">frequent_foods</FONT></TD></TR>
+      <TR><TD PORT="meal_presets"><FONT COLOR="#E8ECF5">meal_presets</FONT></TD></TR>
+      <TR><TD PORT="grocery_list"><FONT COLOR="#E8ECF5">grocery_list</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  personal [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#64D8EC" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#28758A"><FONT COLOR="white"><B>PERSONAL / HOME</B></FONT></TD></TR>
+      <TR><TD PORT="personal"><FONT COLOR="#E8ECF5">personal</FONT></TD></TR>
+      <TR><TD PORT="building_events"><FONT COLOR="#E8ECF5">building_events</FONT></TD></TR>
+      <TR><TD PORT="building_residents"><FONT COLOR="#E8ECF5">building_residents</FONT></TD></TR>
+      <TR><TD PORT="car"><FONT COLOR="#E8ECF5">car</FONT></TD></TR>
+      <TR><TD PORT="car_events"><FONT COLOR="#E8ECF5">car_events</FONT></TD></TR>
+      <TR><TD PORT="sewage_payments"><FONT COLOR="#E8ECF5">sewage_payments</FONT></TD></TR>
+      <TR><TD PORT="barbecue_attendees"><FONT COLOR="#E8ECF5">barbecue_attendees</FONT></TD></TR>
+      <TR><TD PORT="barbecue_items"><FONT COLOR="#E8ECF5">barbecue_items</FONT></TD></TR>
+      <TR><TD PORT="property_requests"><FONT COLOR="#E8ECF5">property_requests</FONT></TD></TR>
+      <TR><TD PORT="reimbursements"><FONT COLOR="#E8ECF5">reimbursements</FONT></TD></TR>
+      <TR><TD PORT="finances"><FONT COLOR="#E8ECF5">finances</FONT></TD></TR>
+      <TR><TD PORT="group_expenses"><FONT COLOR="#E8ECF5">group_expenses</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  ailin [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#D59B57" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#8A5E2B"><FONT COLOR="white"><B>AILIN</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">ailin_roadmap</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">irina</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">irina_phone_setup</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  russia [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#D9778B" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#8C4252"><FONT COLOR="white"><B>RUSSIA TRACKER</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">russia_fuel_crisis</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">russia_fuel_regions</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  behavior [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#9A7BE8" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#6B4FA4"><FONT COLOR="white"><B>BEHAVIOR TRACKING</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">compulsive_behavior_tracking</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  fitness:food_entries:e -> fitness:fitness_log:e [label=" date → date", constraint=false];
+  personal:building_events:e -> personal:building_residents:e [label=" resident_id → id", constraint=false];
+  personal:car_events:e -> personal:car:e [label=" car_id → id", constraint=false];
+  fitness -> personal [style=invis, weight=3];
+  personal -> ailin [style=invis, weight=3];
+  ailin -> russia [style=invis, weight=2];
+  russia -> behavior [style=invis, weight=2];
+}
+''', use_container_width=True)
+
+    with schema_knowledge:
+        st.graphviz_chart(r'''
+digraph schema_knowledge {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.8, ranksep=0.9,
+         fontname="Arial", label="STUDY, RESEARCH & HARDWARE", labelloc=t, fontsize=20, fontcolor="#4DD4A7"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#64D8EC", penwidth=2.2, arrowsize=0.85, fontname="Courier New", fontsize=9, fontcolor="#A8DCE7"];
+
+  study [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#4DD4A7" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#217A63"><FONT COLOR="white"><B>STUDY</B></FONT></TD></TR>
+      <TR><TD PORT="study_areas"><FONT COLOR="#E8ECF5">study_areas</FONT></TD></TR>
+      <TR><TD PORT="study_books"><FONT COLOR="#E8ECF5">study_books</FONT></TD></TR>
+      <TR><TD PORT="study_book_chunks"><FONT COLOR="#E8ECF5">study_book_chunks</FONT></TD></TR>
+      <TR><TD PORT="study_topics"><FONT COLOR="#E8ECF5">study_topics</FONT></TD></TR>
+      <TR><TD PORT="study_exercises"><FONT COLOR="#E8ECF5">study_exercises</FONT></TD></TR>
+      <TR><TD PORT="study_attempts"><FONT COLOR="#E8ECF5">study_attempts</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  research [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#7779E8" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>ANPLOS / RESEARCH / HARDWARE</B></FONT></TD></TR>
+      <TR><TD PORT="anpl_research"><FONT COLOR="#E8ECF5">anpl_research</FONT></TD></TR>
+      <TR><TD PORT="hardware_eval"><FONT COLOR="#E8ECF5">hardware_eval</FONT></TD></TR>
+      <TR><TD PORT="machines"><FONT COLOR="#E8ECF5">machines</FONT></TD></TR>
+      <TR><TD PORT="autocad_docs"><FONT COLOR="#E8ECF5">autocad_docs</FONT></TD></TR>
+      <TR><TD PORT="kb_items"><FONT COLOR="#E8ECF5">kb_items</FONT></TD></TR>
+      <TR><TD PORT="kb_chunks"><FONT COLOR="#E8ECF5">kb_chunks</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  study:study_books:e -> study:study_areas:e [label=" area_id → id", constraint=false];
+  study:study_book_chunks:e -> study:study_books:e [label=" book_id → id", constraint=false];
+  study:study_topics:e -> study:study_books:e [label=" book_id → id", constraint=false];
+  study:study_topics:w -> study:study_areas:w [label=" area_id → id", constraint=false];
+  study:study_exercises:e -> study:study_books:e [label=" book_id → id", constraint=false];
+  study:study_exercises:w -> study:study_topics:w [label=" topic_id → id", constraint=false];
+  study:study_attempts:e -> study:study_topics:e [label=" topic_id → id", constraint=false];
+  study:study_attempts:w -> study:study_exercises:w [label=" exercise_id → id", constraint=false];
+  research:kb_chunks:e -> research:kb_items:e [label=" item_id → id", constraint=false];
+  study -> research [style=invis, weight=3];
+}
+''', use_container_width=True)
