@@ -86,17 +86,6 @@ PROACTIVE_ENABLED: bool = get("PROACTIVE_ENABLED", "1").lower() not in ("0", "fa
 import socket as _socket
 INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
 
-# Reflection tick — dev/home instance only: set AXON_REFLECTION=0 at work.
-REFLECTION_ENABLED: bool = get("AXON_REFLECTION", "1").lower() not in ("0", "false", "no")
-
-# Actor runtime. Disabled by default until the schema/backfill has been applied.
-ACTOR_RUNTIME_ENABLED: bool = get("AXON_ACTORS", "0").lower() in ("1", "true", "yes")
-ACTOR_SHADOW_MODE: bool = get("AXON_ACTOR_SHADOW", "1").lower() in ("1", "true", "yes")
-ACTOR_COMPAT_PROJECTION: bool = get("AXON_ACTOR_COMPAT_PROJECTION", "1").lower() in ("1", "true", "yes")
-ACTOR_WORKER_ID: str = get("AXON_ACTOR_WORKER_ID", f"{INSTANCE}:{_socket.gethostname().lower()}")
-ACTOR_POLL_INTERVAL: float = float(get("AXON_ACTOR_POLL_INTERVAL", "2") or "2")
-ACTOR_LEASE_SECONDS: int = int(get("AXON_ACTOR_LEASE_SECONDS", "660") or "660")
-ACTOR_MAX_MODEL_TURNS: int = min(2, int(get("AXON_ACTOR_MAX_MODEL_TURNS", "2") or "2"))
-ACTOR_MAX_TOOL_BATCHES: int = min(1, int(get("AXON_ACTOR_MAX_TOOL_BATCHES", "1") or "1"))
-ACTOR_MAX_WALL_SECONDS: int = min(600, int(get("AXON_ACTOR_MAX_WALL_SECONDS", "600") or "600"))
-ACTOR_CONSEQUENTIAL_ACTIONS_ENABLED: bool = False
+# Prompt-embedded actors. This enables block injection/parsing inside Anton's
+# existing conversational turn; it never starts a process, timer, or model call.
+ACTORS_ENABLED: bool = get("AXON_ACTORS", "0").lower() in ("1", "true", "yes")

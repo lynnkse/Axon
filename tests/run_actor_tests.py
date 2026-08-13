@@ -9,8 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 failed = 0
 total = 0
-for module_name in ("tests.test_actor_math", "tests.test_actor_runtime", "tests.test_actor_worker",
-                    "tests.test_actor_shadow"):
+for module_name in ("tests.test_prompt_blocks",):
     module = importlib.import_module(module_name)
     for name, fn in inspect.getmembers(module, inspect.isfunction):
         if not name.startswith("test_"):

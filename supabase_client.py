@@ -126,89 +126,89 @@ def _rest_get(path: str, timeout: int = 10):
         return []
 
 
-def _rpc(name: str, payload: dict, timeout: int = 15):
-    """Synchronous RPC for actor operations whose result controls correctness."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
-        return None
-    req = urllib.request.Request(
-        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rpc/{name}",
-        data=json.dumps(payload).encode(), method="POST", headers={
-            "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
-            "Content-Type": "application/json", "Prefer": "return=representation"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode()
-            return json.loads(body) if body else True
-    except Exception as e:
-        log.warning(f"Supabase RPC {name} failed: {e}")
-        return None
-
-
-def append_actor_event(event: dict):
-    return _rpc("append_event", {"p_event": event})
-
-
 def fetch_actor_states() -> list[dict]:
     return _rest_get(f"actor_state?instance=eq.{urllib.parse.quote(config.INSTANCE)}&order=actor_id.asc")
 
 
-def fetch_actor_events(actor_id: str, after_sequence: int = 0) -> list[dict]:
-    assignment = urllib.parse.quote(json.dumps([{"actor_id": actor_id}], separators=(",", ":")))
-    return _rest_get(
-        f"events?sequence=gt.{after_sequence}&assignments=cs.{assignment}&order=sequence.asc&limit=500")
-
-
-def acquire_actor_lease(actor_id: str, revision: int, owner: str, activation_id: str):
-    return _rpc("acquire_actor_lease", {"p_actor_id": actor_id, "p_revision": revision,
-        "p_owner": owner, "p_activation_id": activation_id, "p_ttl_seconds": config.ACTOR_LEASE_SECONDS})
-
-
-def renew_actor_lease(actor_id: str, owner: str, activation_id: str):
-    return bool(_rpc("renew_actor_lease", {"p_actor_id": actor_id, "p_owner": owner,
-        "p_activation_id": activation_id, "p_ttl_seconds": config.ACTOR_LEASE_SECONDS}))
-
-
-def release_actor_lease(actor_id: str, owner: str, activation_id: str) -> bool:
-    return bool(_rpc("release_actor_lease", {"p_actor_id": actor_id, "p_owner": owner,
-        "p_activation_id": activation_id}))
-
-
-def commit_actor_transition(actor_id: str, revision: int, owner: str, activation_id: str,
-                            state: dict, directory: dict, disposition: str,
-                            last_sequence: int, emitted: list[dict]):
-    return _rpc("commit_actor_transition", {"p_actor_id": actor_id, "p_expected_revision": revision,
-        "p_owner": owner, "p_activation_id": activation_id, "p_state": state,
-        "p_directory": directory, "p_disposition": disposition,
-        "p_last_sequence": last_sequence, "p_emitted": emitted})
-
-
-def fetch_due_obligations(source: str = "telegram") -> list[dict]:
-    rows = _rest_get("obligations?status=eq.open&order=due_at.asc.nullslast")
-    from actor_model.obligations import eligible
-    return [r for r in rows if eligible(r, interaction={"source": source})]
-
-
-def mark_obligations_presented(rows: list[dict]) -> bool:
-    ids = [row["id"] for row in rows if row.get("id")]
-    return not ids or bool(_rpc("present_obligations", {"p_ids": ids}))
-
-
-def save_actor_schedule(actor_id: str, revision: int, virtual_deadline: float,
-                        service_debt: float, nice_weight: float) -> bool:
-    return _rest_patch("actor_state", f"actor_id=eq.{urllib.parse.quote(actor_id)}&revision=eq.{revision}", {
-        "virtual_deadline": virtual_deadline, "service_debt": service_debt, "nice_weight": nice_weight})
-
-
-def upsert_actor_seed(row: dict) -> bool:
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY: return False
-    req=urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/actor_state",
-        data=json.dumps(row).encode(),method="POST",headers={"apikey":config.SUPABASE_ANON_KEY,
-        "Authorization":f"Bearer {config.SUPABASE_ANON_KEY}","Content-Type":"application/json",
-        "Prefer":"resolution=ignore-duplicates,return=minimal"})
+def fetch_prompt_actor_states() -> list[dict] | None:
+    """Strict actor fetch: distinguish a real empty table from fetch failure."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        log.error("Prompt actor fetch unavailable: Supabase is not configured")
+        return None
+    path = f"actor_state?instance=eq.{urllib.parse.quote(config.INSTANCE)}&order=actor_id.asc"
+    req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
+        "apikey": config.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+    })
     try:
-        with urllib.request.urlopen(req,timeout=10): return True
-    except Exception as e:
-        log.warning(f"actor seed failed: {e}"); return False
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.error("Prompt actor fetch failed: %s", exc, exc_info=True)
+        return None
+    if not isinstance(rows, list):
+        log.error("Prompt actor fetch returned non-list payload: %r", rows)
+        return None
+    return rows
+
+
+def save_prompt_actor_update(actor_row: dict, update) -> bool:
+    """Synchronously CAS-save one validated prompt-embedded actor update.
+
+    A false return is always logged by this function and must be treated as a
+    visible persistence failure by the caller. Actor history is capped at 50
+    entries in storage; only the newest eight are injected into prompts.
+    """
+    actor_id = actor_row.get("actor_id")
+    revision = int(actor_row.get("revision", 0))
+    old_state = dict(actor_row.get("state") or {})
+    history = list(old_state.get("history") or [])[-49:]
+    now = datetime.utcnow().isoformat() + "Z"
+    history.append({
+        "at": now, "revision": revision + 1, "status": update.status,
+        "summary": update.summary, "state": update.state,
+        **({"error_reason": update.error_reason} if update.error_reason else {}),
+    })
+    state = dict(update.state)
+    state["history"] = history
+    disposition = {"running": "ready_again", "finished": "completed", "error": "blocked"}[update.status]
+    payload = {
+        "state": state,
+        "directory_projection": {"summary": update.summary, "status": update.status},
+        "disposition": disposition,
+        "blocked_reason": update.error_reason if update.status == "error" else None,
+        "revision": revision + 1,
+        "dirty": False,
+        "last_advanced_at": now,
+        "updated_at": now,
+    }
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        log.error("Actor update persistence unavailable for %s: Supabase is not configured", actor_id)
+        return False
+    filters = (f"actor_id=eq.{urllib.parse.quote(str(actor_id))}"
+               f"&revision=eq.{revision}&select=actor_id,revision")
+    req = urllib.request.Request(
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/actor_state?{filters}",
+        data=json.dumps(payload).encode(), method="PATCH", headers={
+            "apikey": config.SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode() or "[]")
+    except Exception as exc:
+        log.error("Actor update persistence failed for %s at revision %s: %s",
+                  actor_id, revision, exc, exc_info=True)
+        return False
+    if len(rows) != 1 or rows[0].get("revision") != revision + 1:
+        log.error("Actor update CAS failed for %s: expected revision %s, response=%r",
+                  actor_id, revision, rows)
+        return False
+    log.info("Prompt actor saved: actor_id=%s revision=%s status=%s",
+             actor_id, revision + 1, update.status)
+    return True
 
 
 def _fire(fn, *args):

@@ -1,5 +1,5 @@
-"""Persistent, bounded actor runtime for Axon."""
+"""Prompt-embedded actor state contracts for Axon."""
 
-from .types import Disposition, Event, TransitionResult
+from .prompt_blocks import ActorBlockError, ActorUpdate
 
-__all__ = ["Disposition", "Event", "TransitionResult"]
+__all__ = ["ActorBlockError", "ActorUpdate"]

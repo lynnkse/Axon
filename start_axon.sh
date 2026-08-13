@@ -1,7 +1,7 @@
 #!/bin/bash
 # start_axon.sh — bring up / restart the full Axon stack
 #
-# manager | actor (when enabled) | telegram | cli | curator | web
+# manager | telegram | cli | curator | web
 #
 # Logic per session:
 #   - Already exists → leave it open, kill what's running, restart the process
@@ -76,15 +76,7 @@ start_in_session cli \
 start_in_session curator \
     "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
 
-# ── 5. actor runtime — bounded persistent actor advancement ───────────────────
-if [[ "${AXON_ACTORS:-0}" =~ ^(1|true|yes)$ ]]; then
-    start_in_session actor \
-        "cd '$AXON_DIR' && $PYTHON -u actor_runtime.py 2>&1 | tee '$LOG_DIR/actor.log'"
-else
-    echo "Actor runtime disabled (set AXON_ACTORS=1 after schema/backfill)."
-fi
-
-# ── 6. web — Streamlit dashboard + ttyd CLI stream ───────────────────────────
+# ── 5. web — Streamlit dashboard + ttyd CLI stream ───────────────────────────
 # Both background processes are managed here; pane shows their combined status.
 TAILSCALE_IP="$(tailscale ip -4 2>/dev/null || echo '<tailscale-ip>')"
 
@@ -110,7 +102,7 @@ echo "╔═══════════════════════�
 echo "║           Axon stack is running              ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Sessions:   manager | telegram | cli         ║"
-echo "║              curator | actor* | web          ║"
+echo "║              curator | web                   ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Dashboard:  http://$TAILSCALE_IP:8501"
 echo "║  CLI stream: http://$TAILSCALE_IP:7681"

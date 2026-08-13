@@ -48,11 +48,10 @@ from typing import Optional
 
 import config
 import supabase_client
-from actor_model.composer import compose_turn
-from actor_model.ingest import interaction_event, response_events
-from actor_model.shadow import actor_is_authoritative, compare_numeric, typed_base
-from actor_model.actors import AntonActor, AxonActor
-from actor_model.types import ActorRecord, Disposition, TransitionContext
+from actor_model.prompt_blocks import (
+    ActorBlockError, active_actor_rows, output_instructions, parse_actor_updates,
+    render_actor_inputs, strip_actor_blocks,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +76,8 @@ class QueueItem:
     source: str       # "telegram" | "proactive"
     user_id: str
     media_path: Optional[str] = None
+    # Snapshot supplied to the same LLM turn; used to validate/CAS-save output.
+    prompt_actor_rows: Optional[list[dict]] = None
 
 
 class SessionManagerNode:
@@ -369,47 +370,6 @@ class SessionManagerNode:
             tension=self._alive_tension,
         )
 
-    def _shadow_alive_state(self) -> dict:
-        return typed_base({"tick": self._alive_tick, "valence": self._alive_valence,
-            "valence_sigma": self._alive_valence_sigma, "arousal": self._alive_arousal,
-            "arousal_sigma": self._alive_arousal_sigma, "mood": self._alive_mood,
-            "personality_note": self._alive_personality, "curiosity_focus": self._alive_curiosity_focus,
-            "background_affect": self._alive_background_affect, "tension": self._alive_tension})
-
-    def _shadow_anton_state(self) -> dict:
-        return typed_base({"valence":self._anton_valence,"valence_sigma":self._anton_valence_sigma,
-            "energy":self._anton_energy,"energy_sigma":self._anton_energy_sigma,
-            "baseline_valence":self._anton_baseline_valence,"baseline_energy":self._anton_baseline_energy,
-            "below_baseline_since":self._epoch_to_iso(self._anton_below_baseline_since),
-            "last_observation_at":self._epoch_to_iso(self._anton_last_observation)})
-
-    @staticmethod
-    def _shadow_record(kind: str, state: dict) -> ActorRecord:
-        return ActorRecord(f"{config.INSTANCE}:{kind}", kind, config.INSTANCE, 0, state, {},
-                           Disposition.READY_AGAIN, dirty=True)
-
-    def _compare_shadow_tick(self, before: dict, event) -> None:
-        result = AxonActor().transition(self._shadow_record("axon", before), [event],
-            TransitionContext("shadow", datetime.now(timezone.utc)))
-        compare_numeric("axon interaction tick", self._shadow_alive_state(), result.state,
-            ("tick","valence","valence_sigma","arousal","arousal_sigma","tension","background_affect"))
-
-    def _compare_shadow_response(self, alive_before: dict, anton_before: dict, events: list) -> None:
-        now = datetime.now(timezone.utc); context = TransitionContext("shadow", now)
-        anton_events = [e for e in events if e.event_type == "anton_state_observed"]
-        empathy = []
-        if anton_events:
-            anton_result = AntonActor().transition(self._shadow_record("anton", anton_before), anton_events, context)
-            empathy = anton_result.emitted_events
-            compare_numeric("anton response fold", self._shadow_anton_state(), anton_result.state,
-                ("valence","valence_sigma","energy","energy_sigma","baseline_valence","baseline_energy"))
-        axon_events = [e for e in events if e.event_type in
-            {"affect_tag_emitted","goal_completed","high_confidence_valence_report"}] + empathy
-        if axon_events:
-            axon_result = AxonActor().transition(self._shadow_record("axon", alive_before), axon_events, context)
-            compare_numeric("axon response fold", self._shadow_alive_state(), axon_result.state,
-                ("valence","valence_sigma","arousal","arousal_sigma","tension"))
-
     # ------------------------------------------------------------------
     # Config / system prompt
     # ------------------------------------------------------------------
@@ -501,6 +461,8 @@ class SessionManagerNode:
                 "sequence of steps, hit a failure mode and found the fix, built something reusable. "
                 "Skills are stored in the rules table and surfaced automatically in future sessions when keywords match."
             )
+        if config.ACTORS_ENABLED:
+            parts.append("\n" + output_instructions())
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -989,51 +951,6 @@ class SessionManagerNode:
         "moved your state."
     )
 
-    def _reflection_ticker_thread(self):
-        """Fires a self-injected reflection at most ~once/day, only after the
-        conversation has been idle for a while. The reflection runs through the
-        normal queue -> Claude -> tag-parsing pipeline, so dreams/insights land
-        via existing machinery; telegram_node routes source='reflection' to a
-        sink branch (never delivered as a chat reply).
-
-        Multi-instance: gated by AXON_REFLECTION so only the dev/home instance
-        dreams — the release instance at work stays lean."""
-        if not config.REFLECTION_ENABLED:
-            log.info(f"Reflection tick disabled on instance '{config.INSTANCE}' (AXON_REFLECTION=0)")
-            return
-        while self._running:
-            time.sleep(600)
-            try:
-                now = time.time()
-                if self.state != "IDLE":
-                    continue
-                if now - self._last_user_msg_time < self.REFLECTION_IDLE_H * 3600:
-                    continue
-                if (self._last_reflection_time is not None
-                        and now - self._last_reflection_time < self.REFLECTION_MIN_GAP_H * 3600):
-                    continue
-                # Stamp BEFORE enqueueing: generation takes minutes, and a crash
-                # mid-reflection shouldn't cause a retry storm on restart.
-                self._last_reflection_time = now
-                if config.ACTOR_RUNTIME_ENABLED:
-                    from actor_model.types import Assignment, Event
-                    request_key = f"{config.INSTANCE}:reflection:{time.time_ns()}"
-                    supabase_client.append_actor_event(Event(
-                        "reflection_requested", config.INSTANCE, "deterministic_clock",
-                        {"idle_hours": (now-self._last_user_msg_time)/3600},
-                        {"idle_gate": self.REFLECTION_IDLE_H, "minimum_gap": self.REFLECTION_MIN_GAP_H},
-                        (Assignment(f"{config.INSTANCE}:reflection", reason="idle window elapsed"),),
-                        request_key).as_payload())
-                if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
-                    self._save_anton_model()
-                log.info("Reflection tick: actor event recorded" if config.ACTOR_RUNTIME_ENABLED
-                         else "Reflection tick: enqueueing legacy reflection")
-                if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
-                    self.input_queue.put(QueueItem(
-                        text=self.REFLECTION_PROMPT, source="reflection", user_id="system"))
-            except Exception as e:
-                log.warning(f"Reflection ticker error: {e}")
-
     def _queue_processor_thread(self):
         while self._running:
             item = self.input_queue.get()
@@ -1057,28 +974,17 @@ class SessionManagerNode:
             if item.source != "reflection":
                 self._last_user_msg_time = time.time()
 
-            actor_interaction = None
-            shadow_tick_before = None
-            if config.ACTOR_RUNTIME_ENABLED:
-                interaction_key = f"{config.INSTANCE}:{item.source}:{item.user_id}:{time.time_ns()}"
-                actor_interaction = interaction_event(
-                    item.text, config.INSTANCE, item.source, item.user_id, interaction_key)
-                supabase_client.append_actor_event(actor_interaction.as_payload())
-                setattr(item, "interaction_key", interaction_key)
-            if not actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
-                # Legacy fallback during the rollback window.
-                if config.ACTOR_RUNTIME_ENABLED and config.ACTOR_SHADOW_MODE and actor_interaction:
-                    shadow_tick_before = self._shadow_alive_state()
-                self._alive_tick += 1
-                self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
-                self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
-                self._alive_valence += self.HOMEOSTASIS_RATE * (self.VALENCE_BASELINE - self._alive_valence)
-                self._alive_arousal += self.HOMEOSTASIS_RATE * (self.AROUSAL_BASELINE - self._alive_arousal)
-                self._alive_tension = max(0.0, self._alive_tension - 0.01)
-                self._alive_background_affect *= 0.98
-                self._save_full_alive_state()
-                if shadow_tick_before is not None:
-                    self._compare_shadow_tick(shadow_tick_before, actor_interaction)
+            # Existing affective behavior remains part of the normal turn. The
+            # corrected actor mechanism is additive prompt context, not a
+            # background runtime or an alternative execution path.
+            self._alive_tick += 1
+            self._alive_valence_sigma = min(0.4, self._alive_valence_sigma + 0.01)
+            self._alive_arousal_sigma = min(0.4, self._alive_arousal_sigma + 0.01)
+            self._alive_valence += self.HOMEOSTASIS_RATE * (self.VALENCE_BASELINE - self._alive_valence)
+            self._alive_arousal += self.HOMEOSTASIS_RATE * (self.AROUSAL_BASELINE - self._alive_arousal)
+            self._alive_tension = max(0.0, self._alive_tension - 0.01)
+            self._alive_background_affect *= 0.98
+            self._save_full_alive_state()
 
             # If we know the session file, record its current size so we only
             # read entries written AFTER this message. If session_id is unknown
@@ -1111,19 +1017,39 @@ class SessionManagerNode:
             reflection_context = ""
             if item.source == "telegram":
                 reflection_context = supabase_client.fetch_relevant_dreams(item.text)
-            if actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
-                # Read-only composition never waits for actor advancement.
-                due_obligations = supabase_client.fetch_due_obligations(item.source)
-                supabase_client.mark_obligations_presented(due_obligations)
-                message_text = compose_turn(item.text, supabase_client.fetch_actor_states(),
-                    due_obligations, permanent_rules,
-                    relevant_rules, reflection_context)
-            else:
-                alive_prefix = self._alive_message_prefix()
-                prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
-                message_text = prefix + item.text
-                if reflection_context:
-                    message_text = reflection_context + "\n\n" + message_text
+            alive_prefix = self._alive_message_prefix()
+            prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
+
+            # Actors are fetched exactly once, only while handling a real user
+            # prompt. Every non-terminal actor is included; an empty table adds
+            # nothing. Rows are retained on the QueueItem for strict response
+            # validation and revision-checked persistence after this same call.
+            actor_rows = []
+            actor_context = ""
+            is_real_user_prompt = item.source not in {"reflection", "proactive", "system"}
+            if config.ACTORS_ENABLED and is_real_user_prompt:
+                fetched_actor_rows = supabase_client.fetch_prompt_actor_states()
+                if fetched_actor_rows is None:
+                    log.error("Prompt actor injection skipped because actor_state fetch failed")
+                else:
+                    try:
+                        actor_rows = active_actor_rows(fetched_actor_rows)
+                        actor_context = render_actor_inputs(actor_rows)
+                    except ActorBlockError as exc:
+                        actor_rows = []
+                        log.error("Prompt actor inputs rejected: %s", exc)
+                    else:
+                        log.info("Prompt actors included: count=%d ids=%s", len(actor_rows),
+                                 [row.get("actor_id") for row in actor_rows])
+            item.prompt_actor_rows = actor_rows
+
+            message_parts = [prefix.rstrip()]
+            if reflection_context:
+                message_parts.insert(0, reflection_context)
+            if actor_context:
+                message_parts.append(actor_context)
+            message_parts.append(item.text)
+            message_text = "\n\n".join(part for part in message_parts if part)
 
             # Inject message via PTY.
             # Claude's TUI runs in raw terminal mode: Enter = \r (not \n).
@@ -1173,17 +1099,32 @@ class SessionManagerNode:
     # ------------------------------------------------------------------
 
     def _publish_response(self, item: QueueItem, response_text: str):
-        actor_events = []
-        shadow_alive_before = shadow_anton_before = None
-        if config.ACTOR_RUNTIME_ENABLED:
-            interaction_key = getattr(item, "interaction_key", f"legacy:{time.time_ns()}")
-            actor_events = response_events(response_text, config.INSTANCE, item.source, interaction_key)
-            for event in actor_events:
-                supabase_client.append_actor_event(event.as_payload())
-            if actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE):
-                self._publish_clean_response(item, response_text)
-                return
-            shadow_alive_before, shadow_anton_before = self._shadow_alive_state(), self._shadow_anton_state()
+        actor_rows = item.prompt_actor_rows or []
+        expected_actor_ids = {str(row.get("actor_id")) for row in actor_rows}
+        if config.ACTORS_ENABLED and expected_actor_ids:
+            try:
+                updates = parse_actor_updates(response_text, expected_actor_ids)
+            except ActorBlockError as exc:
+                log.error("Prompt actor response rejected; no actor rows written: %s", exc)
+            else:
+                rows_by_id = {str(row.get("actor_id")): row for row in actor_rows}
+                failures = []
+                for update in updates:
+                    if not supabase_client.save_prompt_actor_update(rows_by_id[update.actor_id], update):
+                        failures.append(update.actor_id)
+                if failures:
+                    log.error("Prompt actor persistence incomplete; failed actor_ids=%s", failures)
+                else:
+                    log.info("Prompt actor response persisted: count=%d", len(updates))
+        elif config.ACTORS_ENABLED and ("<<<AXON_ACTOR_UPDATE>>>" in response_text
+                                        or "<<<END_AXON_ACTOR_UPDATE>>>" in response_text):
+            try:
+                parse_actor_updates(response_text, set())
+            except ActorBlockError as exc:
+                log.error("Unexpected prompt actor output rejected: %s", exc)
+
+        # Protocol blocks are internal state, never part of Anton's visible reply.
+        response_without_actor_blocks = strip_actor_blocks(response_text)
         # Parse alive tags before stripping
         import re as _re
         _changed = False
@@ -1281,17 +1222,11 @@ class SessionManagerNode:
                 f"mood={self._alive_mood}"
             )
 
-        if shadow_alive_before is not None and shadow_anton_before is not None:
-            self._compare_shadow_response(shadow_alive_before, shadow_anton_before, actor_events)
-
-        self._publish_clean_response(item, response_text)
+        self._publish_clean_response(item, response_without_actor_blocks)
 
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         """Persist/strip generic tags and publish; contains no actor transition work."""
-        clean_text = (supabase_client.strip_response_tags(response_text) if
-                      actor_is_authoritative(config.ACTOR_RUNTIME_ENABLED, config.ACTOR_SHADOW_MODE)
-                      and item.source == "reflection" else
-                      supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL))
+        clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
         supabase_client.save_message(
             role="assistant",
             content=clean_text,
@@ -1660,7 +1595,6 @@ class SessionManagerNode:
             threading.Thread(target=self._display_server_thread, daemon=True),
             threading.Thread(target=self._response_server_thread, daemon=True),
             threading.Thread(target=self._permission_server_thread, daemon=True),
-            threading.Thread(target=self._reflection_ticker_thread, daemon=True),
         ]
         for t in threads:
             t.start()

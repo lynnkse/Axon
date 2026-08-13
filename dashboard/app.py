@@ -308,6 +308,15 @@ div[data-testid="stExpanderDetails"] { padding: 14px 16px 16px; }
 }
 .project-stage.done .project-stage-name { color: #b5e9d7; }
 .project-stage.in-progress .project-stage-name { color: #dadaff; font-weight: 760; }
+.stage-detail-heading {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
+  color: #dadaff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; font-weight: 760; letter-spacing: .045em; text-transform: uppercase;
+}
+.stage-detail-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--axon-accent);
+  box-shadow: 0 0 12px rgba(139,140,255,.55);
+}
 @keyframes axon-stage-pulse {
   0%, 100% { box-shadow: 0 0 0 4px rgba(139,140,255,.08), 0 0 15px rgba(139,140,255,.28); }
   50% { box-shadow: 0 0 0 6px rgba(139,140,255,.14), 0 0 25px rgba(139,140,255,.48); }
@@ -660,6 +669,7 @@ with tab_projects:
                 stages = (project.get("metadata") or {}).get("stages")
                 if isinstance(stages, list):
                     stage_blocks = []
+                    valid_stages = []
                     for index, stage in enumerate(stages):
                         if not isinstance(stage, dict):
                             continue
@@ -668,10 +678,12 @@ with tab_projects:
                             "done" if stage_status == "done" else "planned"
                         )
                         marker = "✓" if stage_status == "done" else str(index + 1)
+                        stage_name = str(stage.get("name") or f"Stage {index + 1}")
+                        valid_stages.append((stage_name, stage))
                         stage_blocks.append(
                             f'<div class="project-stage {status_class}">'
                             f'<div class="project-stage-node">{html.escape(marker)}</div>'
-                            f'<div class="project-stage-name">{html.escape(str(stage.get("name") or f"Stage {index + 1}"))}</div>'
+                            f'<div class="project-stage-name">{html.escape(stage_name)}</div>'
                             '</div>'
                         )
                     if stage_blocks:
@@ -679,6 +691,25 @@ with tab_projects:
                             '<div class="project-stages">' + "".join(stage_blocks) + '</div>',
                             unsafe_allow_html=True,
                         )
+                        selected_stage_index = st.selectbox(
+                            "Inspect stage",
+                            range(len(valid_stages)),
+                            format_func=lambda position: valid_stages[position][0],
+                            key=f"project_stage_{project_id}",
+                        )
+                        selected_stage_name, selected_stage = valid_stages[selected_stage_index]
+                        with st.container(border=True):
+                            st.markdown(
+                                '<div class="stage-detail-heading">'
+                                '<span class="stage-detail-dot"></span>'
+                                f'{html.escape(selected_stage_name)}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            detail = selected_stage.get("detail")
+                            if detail:
+                                st.markdown(str(detail))
+                            else:
+                                st.caption("No stage detail recorded yet.")
 
                 insights = _sb_get(
                     "insights",
@@ -722,7 +753,7 @@ with tab_projects:
 # Reasoner/Executor split worked out earlier this session.
 with tab_architecture:
     st.subheader("Axon Architecture")
-    st.caption("Solid blue/orange views are deployed today; the dashed purple actor model is a proposed design.")
+    st.caption("Deployed relay views plus the corrected prompt-embedded actor design. No actor timers, polling, background process, or separate actor LLM calls.")
 
     view_current, view_actor, view_prompt, view_affect = st.tabs(
         ["Current system", "Actor-model design", "Prompt composition", "Affective loop"]
@@ -793,132 +824,108 @@ digraph current_axon {
 ''', use_container_width=True)
 
     with view_actor:
-        st.markdown("#### Proposed persistent actor-model execution")
+        st.markdown("#### Corrected actor design · prompt-embedded, turn-bound")
         st.caption(
-            "Not implemented. Each stage is a record (fields stacked like an OS process control block) — "
-            "a few big arrows show how an actor moves through one tick, and separately, how a response gets composed."
+            "Hard security boundary: actors can advance only inside a real prompt sent by Anton. "
+            "They are blocks in the normal conversation—not processes, timers, polling loops, or separate model calls."
         )
         st.graphviz_chart(r'''
-digraph actor_pcb {
-  graph [rankdir=TB, bgcolor="transparent", pad=0.3, nodesep=0.6, ranksep=0.5,
-         fontname="Arial", label="DESIGN — NOT YET BUILT  (one actor's tick, left · a response, right)", labelloc=t, fontsize=18, fontcolor="#7651A8"];
+digraph corrected_actor_boundary {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.25, nodesep=0.65, ranksep=0.5,
+         fontname="Arial", label="ACTORS EXIST ONLY INSIDE ANTON'S CONVERSATIONAL TURN", labelloc=t,
+         fontsize=18, fontcolor="#A9AAFF"];
   node [shape=plain, fontname="Arial"];
+  edge [color="#8B8CFF", penwidth=3, arrowsize=1.05, fontname="Courier New", fontsize=10, fontcolor="#DADAFF"];
 
-  record [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#7651A8" BGCOLOR="#FAF7FE">
-      <TR><TD BGCOLOR="#7651A8" COLSPAN="2"><FONT COLOR="white"><B>ACTOR RECORD  (like a PCB)</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">actor_id / type</TD><TD ALIGN="LEFT">physical-state · ANPLOS · Axon-improve</TD></TR>
-      <TR><TD ALIGN="LEFT">revision</TD><TD ALIGN="LEFT">N  (optimistic concurrency)</TD></TR>
-      <TR><TD ALIGN="LEFT">state</TD><TD ALIGN="LEFT">typed fold, isolated per actor</TD></TR>
-      <TR><TD ALIGN="LEFT">eligibility</TD><TD ALIGN="LEFT">dirty · unblocked · cooldown</TD></TR>
-      <TR><TD ALIGN="LEFT">priority</TD><TD ALIGN="LEFT">scheduling class · niceness</TD></TR>
-      <TR><TD ALIGN="LEFT">last_advanced_at</TD><TD ALIGN="LEFT">timestamp</TD></TR>
-    </TABLE>
-  >];
-
-  sched [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#7651A8" BGCOLOR="#FAF7FE">
-      <TR><TD BGCOLOR="#7651A8" COLSPAN="2"><FONT COLOR="white"><B>SCHEDULER DECISION</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">eligible set</TD><TD ALIGN="LEFT">only actors past their gate</TD></TR>
-      <TR><TD ALIGN="LEFT">ordering</TD><TD ALIGN="LEFT">virtual deadline · service debt</TD></TR>
-      <TR><TD ALIGN="LEFT">budget</TD><TD ALIGN="LEFT">bounded quantum this pass</TD></TR>
-      <TR><TD ALIGN="LEFT">selected?</TD><TD ALIGN="LEFT">yes → runs one tick</TD></TR>
-    </TABLE>
-  >];
-
-  tick [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#7651A8" BGCOLOR="#FAF7FE">
-      <TR><TD BGCOLOR="#7651A8" COLSPAN="2"><FONT COLOR="white"><B>ONE BOUNDED TICK</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">input</TD><TD ALIGN="LEFT">assigned events + state at rev N</TD></TR>
-      <TR><TD ALIGN="LEFT">work</TD><TD ALIGN="LEFT">deterministic, or one LLM call</TD></TR>
-      <TR><TD ALIGN="LEFT">output</TD><TD ALIGN="LEFT">validated state patch</TD></TR>
-      <TR><TD ALIGN="LEFT">commit</TD><TD ALIGN="LEFT">rev N→N+1, else retry</TD></TR>
-    </TABLE>
-  >];
-
-  directory [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#D99A2B" BGCOLOR="#FFFBF0">
-      <TR><TD BGCOLOR="#D99A2B" COLSPAN="2"><FONT COLOR="white"><B>ACTOR DIRECTORY  (compact)</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">physical-state</TD><TD ALIGN="LEFT">active, energy-low, 2h ago</TD></TR>
-      <TR><TD ALIGN="LEFT">anplos</TD><TD ALIGN="LEFT">paused until Friday</TD></TR>
-      <TR><TD ALIGN="LEFT">commitments</TD><TD ALIGN="LEFT">3 due, 1 escalating</TD></TR>
-    </TABLE>
-  >];
-
-  response [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#2E6F9E" BGCOLOR="#F2F8FF">
-      <TR><TD BGCOLOR="#2E6F9E" COLSPAN="2"><FONT COLOR="white"><B>RESPONSE  (when Anton messages)</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">reads</TD><TD ALIGN="LEFT">directory + eligible obligations</TD></TR>
-      <TR><TD ALIGN="LEFT">never</TD><TD ALIGN="LEFT">waits on a background tick</TD></TR>
-      <TR><TD ALIGN="LEFT">produces</TD><TD ALIGN="LEFT">one coherent reply</TD></TR>
-    </TABLE>
-  >];
-
-  record -> sched [penwidth=3, color="#7651A8", arrowsize=1.2, label="eligible", fontname="Arial Bold", fontsize=11];
-  sched -> tick [penwidth=3, color="#7651A8", arrowsize=1.2, label="selected", fontname="Arial Bold", fontsize=11];
-  tick -> record [penwidth=3, color="#7651A8", arrowsize=1.2, label="new revision", fontname="Arial Bold", fontsize=11, style=dashed];
-  record -> directory [penwidth=3, color="#D99A2B", arrowsize=1.2, label="projected", fontname="Arial Bold", fontsize=11];
-  directory -> response [penwidth=3, color="#2E6F9E", arrowsize=1.2, label="read-only", fontname="Arial Bold", fontsize=11];
-}
-''', use_container_width=True)
-
-    with view_prompt:
-        st.markdown("#### Literal prompt composition order")
-        st.caption(
-            "The append-system-prompt layer is built once when Claude starts or resumes. The lower chain is rebuilt "
-            "for every queued item; semantic dreams are fetched only for source=telegram."
-        )
-        st.graphviz_chart(r'''
-digraph prompt_composition {
-  graph [rankdir=LR, bgcolor="transparent", pad=0.25, nodesep=0.5, ranksep=0.6,
-         fontname="Arial", label="MODEL-VISIBLE CONTEXT — OUTER TO INNER", labelloc=t, fontsize=17];
-  node [shape=plain, fontname="Arial"];
-  edge [color="#667A89", arrowsize=0.7, fontname="Arial", fontsize=9];
-
-  spawn [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5" COLOR="#D97A4A" BGCOLOR="#FFF8F2">
-      <TR><TD BGCOLOR="#D97A4A" COLSPAN="1"><FONT COLOR="white"><B>A. Spawn time only  (--append-system-prompt)</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">1&nbsp; User name + timezone</TD></TR>
-      <TR><TD ALIGN="LEFT">2&nbsp; profile.md</TD></TR>
-      <TR><TD ALIGN="LEFT">3&nbsp; Initial alive-state block + tag protocol</TD></TR>
-      <TR><TD ALIGN="LEFT">4&nbsp; Active permanent skills index</TD></TR>
-      <TR><TD ALIGN="LEFT">5&nbsp; Memory context (memory + goals)</TD></TR>
-      <TR><TD ALIGN="LEFT">6&nbsp; Recent messages (last 20)</TD></TR>
-      <TR><TD ALIGN="LEFT">7&nbsp; Tag-output instructions</TD></TR>
+  anton [label=<
+    <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="11" COLOR="#64D8EC" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#28758A"><FONT COLOR="white"><B>ACTUAL PROMPT FROM ANTON</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#DDE7F4">the only activation trigger</FONT></TD></TR>
     </TABLE>
   >];
 
   turn [label=<
-    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5" COLOR="#2E8B70" BGCOLOR="#F2FBF7">
-      <TR><TD BGCOLOR="#2E8B70"><FONT COLOR="white"><B>B. Rebuilt every queued item</B></FONT></TD></TR>
-      <TR><TD ALIGN="LEFT">
-        <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" COLOR="#7651A8" BGCOLOR="#F5F0FC">
-          <TR><TD BGCOLOR="#7651A8" COLSPAN="2"><FONT COLOR="white"><B>ACTOR DIRECTORY  (today: 4 separate lines · design: 1 unified row)</B></FONT></TD></TR>
-          <TR><TD ALIGN="LEFT">Axon actor</TD><TD ALIGN="LEFT">valence history, the "soul" — [ALIVE ...]</TD></TR>
-          <TR><TD ALIGN="LEFT">Anton actor</TD><TD ALIGN="LEFT">mostly empty for now, running but undefined — [ANTON-MODEL ...]</TD></TR>
-          <TR><TD ALIGN="LEFT">Reflection actor</TD><TD ALIGN="LEFT">idle-time output, was called "dreams" — semantic recall</TD></TR>
-          <TR><TD ALIGN="LEFT"><FONT COLOR="#8A7A9C">… other actors</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8A7A9C">ANPLOS-improvement, commitments, etc. — not fixed to these 3</FONT></TD></TR>
-          <TR><TD ALIGN="LEFT" BGCOLOR="#EDE5F7">Directives</TD><TD ALIGN="LEFT" BGCOLOR="#EDE5F7">not an actor — imperative, computed from actor state each time</TD></TR>
-        </TABLE>
-      </TD></TR>
-      <TR><TD ALIGN="LEFT">Permanent unnamed protocols — small critical rules, always in full</TD></TR>
-      <TR><TD ALIGN="LEFT">Keyword-matched rule anchors</TD></TR>
-      <TR><TD ALIGN="LEFT" BGCOLOR="#FFF4D6">Original queued item text</TD></TR>
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#8B8CFF" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>ONE CONVERSATIONAL TURN</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">normal context + user message</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#DADAFF"><B>variable actor blocks 1..N</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">one shared LLM call</FONT></TD></TR>
     </TABLE>
   >];
 
-  model [label="Claude Code\ncontext", shape=component, style=filled, fillcolor="#FFF1E8", color="#D97A4A", fontname="Arial", fontsize=11];
+  invariant [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#D9778B" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#8C4252"><FONT COLOR="white"><B>HARD SECURITY INVARIANT</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">zero timers · zero polling</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">zero background actor processes</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">zero separate actor LLM calls</FONT></TD></TR>
+    </TABLE>
+  >];
 
-  spawn -> turn [style=dashed, label="same persistent session"];
-  turn -> model [label="written to PTY"];
+  anton -> turn [label="build + send"];
+  turn -> invariant [style=invis];
+}
+''', use_container_width=True)
+
+    with view_prompt:
+        st.markdown("#### Prompt-embedded actors · input and output contract")
+        st.caption(
+            "One normal conversational call carries every selected actor block in and every updated actor block out. "
+            "The active count is flexible; when capacity is limited, crucial work is selected without starving eligible actors."
+        )
+        st.graphviz_chart(r'''
+digraph prompt_actor_contract {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.22, nodesep=0.48, ranksep=0.4,
+         fontname="Arial", label="ONE PROMPT · ONE LLM CALL · N ACTOR BLOCKS", labelloc=t,
+         fontsize=18, fontcolor="#A9AAFF"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#8B8CFF", penwidth=3, arrowsize=1.05, fontname="Courier New", fontsize=9, fontcolor="#DADAFF"];
+
+  input [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#64D8EC" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#28758A"><FONT COLOR="white"><B>INPUT · BUILT FOR THIS PROMPT</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#E8ECF5">normal conversational context</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#E8ECF5">Anton's current message</FONT></TD></TR>
+      <TR><TD BGCOLOR="#1B2038" ALIGN="LEFT"><FONT COLOR="#DADAFF"><B>actor block 1</B> · current stored state</FONT></TD></TR>
+      <TR><TD BGCOLOR="#1B2038" ALIGN="LEFT"><FONT COLOR="#A9AAFF">actor block 2 … actor block N</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#9AA6B7">N = active · not finished · not errored · within capacity</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  model [label=<
+    <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="13" COLOR="#8B8CFF" BGCOLOR="#171B31">
+      <TR><TD><FONT COLOR="white"><B>ONE SHARED<BR/>LLM CALL</B></FONT></TD></TR>
+    </TABLE>
+  >];
+
+  output [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#4DD4A7" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#217A63"><FONT COLOR="white"><B>OUTPUT · ONE RESPONSE</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="#E8ECF5">normal conversational reply</FONT></TD></TR>
+      <TR><TD BGCOLOR="#15251F" ALIGN="LEFT"><FONT COLOR="#B5E9D7"><B>updated actor block 1</B> · running | finished | error</FONT></TD></TR>
+      <TR><TD BGCOLOR="#15251F" ALIGN="LEFT"><FONT COLOR="#8ED9C0">updated actor block 2 … actor block N</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  store [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#7779E8" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>SUPABASE</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">parse blocks</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">append to each actor's row / history</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  input -> model [label="same prompt"];
+  model -> output [label="same response"];
+  output -> store [label="updated actor blocks"];
 }
 ''', use_container_width=True)
 
     with view_affect:
-        st.markdown("#### Alive state, Anton model, and reflection loop")
+        st.markdown("#### Legacy affective loop · superseded reference")
         st.caption(
-            "Axon's affect uses delta-style Kalman updates plus per-message mean reversion. Anton's separate "
-            "absolute-level filter accepts explicit and inferred observations, but only explicit observations move his baseline."
+            "Historical deployed behavior retained as a reference for the filter math. Its reflection timer is not active; "
+            "under the corrected design, any future affect actors can advance only as blocks inside Anton's real prompt."
         )
         st.graphviz_chart(r'''
 digraph affective_loop {
@@ -987,28 +994,34 @@ digraph affective_loop {
 ''', use_container_width=True)
 
         st.markdown("---")
-        st.markdown("#### Target: the same three, as actors")
+        st.markdown("#### Corrected target: affect as prompt blocks")
         st.caption(
-            "Design, not built. Same behaviors, but every cross-actor influence becomes an explicit typed "
-            "event instead of one filter directly calling into another — this is what makes any one of the "
-            "three independently redesignable later."
+            "Axon, Anton-model, and reflection state may appear as variable actor blocks in the same conversational prompt. "
+            "They do not tick independently and do not invoke separate model calls."
         )
         st.graphviz_chart(r'''
-digraph affective_actors_target {
-  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.6, ranksep=0.9,
-         fontname="Arial", label="DESIGN — NOT YET BUILT", labelloc=t, fontsize=18, fontcolor="#7651A8"];
-  node [shape=box, style="rounded,filled,dashed", fontname="Arial", fontsize=10,
-        color="#7651A8", fillcolor="#F5F0FC", fontcolor="#2D2140"];
-  edge [fontname="Arial", fontsize=9, color="#7651A8", fontcolor="#5C427E", arrowsize=0.9];
-
-  axon_actor [label="Axon actor\nvalence · mood · tension\nisolated fold, own revision", penwidth=2];
-  anton_actor [label="Anton actor\nvalence/energy model\nisolated fold, own revision", penwidth=2];
-  reflection_actor [label="Reflection actor\nidle-time analysis\nisolated fold, own revision", penwidth=2];
-
-  anton_actor -> axon_actor [penwidth=2.5, label="event: high_confidence_valence_report\n(only if explicit — same gate as today)"];
-  reflection_actor -> axon_actor [penwidth=2.5, label="event: affect_tag_emitted\n(optional)"];
-  anton_actor -> reflection_actor [penwidth=2.5, style=dashed, label="read: state + log, for analysis"];
-  reflection_actor -> anton_actor [penwidth=2.5, label="event: insight_emitted"];
+digraph affective_prompt_blocks {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.2, nodesep=0.55,
+         fontname="Arial", label="SAME TURN · SAME PROMPT · SAME LLM CALL", labelloc=t,
+         fontsize=17, fontcolor="#A9AAFF"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#8B8CFF", penwidth=3, arrowsize=1.0];
+  prompt [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#8B8CFF" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>CONVERSATIONAL PROMPT</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">normal context + Anton's message</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#DADAFF">Axon affect block · if active</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#DADAFF">Anton-model block · if active</FONT></TD></TR>
+      <TR><TD><FONT COLOR="#DADAFF">reflection block · if active</FONT></TD></TR>
+    </TABLE>
+  >];
+  output [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="9" COLOR="#4DD4A7" BGCOLOR="#121720">
+      <TR><TD BGCOLOR="#217A63"><FONT COLOR="white"><B>ONE RESPONSE</B></FONT></TD></TR>
+      <TR><TD><FONT COLOR="#E8ECF5">reply + updated block states</FONT></TD></TR>
+    </TABLE>
+  >];
+  prompt -> output;
 }
 ''', use_container_width=True)
 
