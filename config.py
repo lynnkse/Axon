@@ -89,3 +89,4 @@ INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
 # Prompt-embedded actors. This enables block injection/parsing inside Anton's
 # existing conversational turn; it never starts a process, timer, or model call.
 ACTORS_ENABLED: bool = get("AXON_ACTORS", "0").lower() in ("1", "true", "yes")
+MAX_ACTOR_SLOTS: int = max(1, int(get("MAX_ACTOR_SLOTS", "4") or "4"))

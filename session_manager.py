@@ -1033,13 +1033,15 @@ class SessionManagerNode:
                     log.error("Prompt actor injection skipped because actor_state fetch failed")
                 else:
                     try:
-                        actor_rows = active_actor_rows(fetched_actor_rows)
+                        actor_rows = active_actor_rows(
+                            fetched_actor_rows, max_slots=config.MAX_ACTOR_SLOTS)
                         actor_context = render_actor_inputs(actor_rows)
                     except ActorBlockError as exc:
                         actor_rows = []
                         log.error("Prompt actor inputs rejected: %s", exc)
                     else:
-                        log.info("Prompt actors included: count=%d ids=%s", len(actor_rows),
+                        log.info("Prompt actors included: count=%d slots=%d ids=%s", len(actor_rows),
+                                 config.MAX_ACTOR_SLOTS,
                                  [row.get("actor_id") for row in actor_rows])
             item.prompt_actor_rows = actor_rows
 

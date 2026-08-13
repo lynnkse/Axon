@@ -64,13 +64,14 @@ def _bounded(value: Any, depth: int = 0) -> Any:
     return _bounded(str(value), depth + 1)
 
 
-def active_actor_rows(rows: list[dict]) -> list[dict]:
-    """Return every non-terminal actor; no prioritization or zero-work choice."""
+def active_actor_rows(rows: list[dict], max_slots: int | None = None) -> list[dict]:
+    """Select non-terminal actors by Linux nice priority, optionally capped."""
     terminal = {"completed", "finished", "blocked", "error"}
-    return sorted(
+    eligible = sorted(
         (row for row in rows if str(row.get("disposition", "")).lower() not in terminal),
-        key=lambda row: str(row.get("actor_id", "")),
+        key=lambda row: (int(row.get("nice", 0) or 0), str(row.get("actor_id", ""))),
     )
+    return eligible if max_slots is None else eligible[:max(0, max_slots)]
 
 
 def render_actor_inputs(rows: list[dict]) -> str:

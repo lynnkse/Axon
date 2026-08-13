@@ -25,6 +25,19 @@ def test_active_rows_exclude_finished_and_error():
     assert [r["actor_id"] for r in active_actor_rows(rows)] == ["dormant","running"]
 
 
+def test_actor_slots_cap_and_prioritize_lower_nice():
+    rows = [
+        {**row("normal-b"), "nice": 0},
+        {**row("lowest"), "nice": -10},
+        {**row("excluded"), "nice": 12},
+        {**row("normal-a"), "nice": 0},
+        {**row("high"), "nice": -5},
+    ]
+    selected = active_actor_rows(rows, max_slots=4)
+    assert [actor["actor_id"] for actor in selected] == [
+        "lowest", "high", "normal-a", "normal-b"]
+
+
 def test_input_history_is_bounded_to_eight():
     text=render_actor_inputs([row(history=[{"n":n} for n in range(12)])])
     payload=json.loads(text.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
