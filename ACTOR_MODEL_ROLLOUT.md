@@ -1,6 +1,8 @@
 # Prompt-embedded actor mechanism
 
 Actors have no runtime, scheduler, timer, poller, or separate LLM call.
+Actor rows are global/shared across Axon instances; `actor_id` is an opaque
+identity and prompt fetches never filter by deployment instance.
 
 - `AXON_ACTORS=0`: actor blocks are disabled.
 - `AXON_ACTORS=1`: on each real user prompt, every non-terminal `actor_state`

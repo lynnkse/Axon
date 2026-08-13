@@ -9,12 +9,12 @@ from actor_model.prompt_blocks import (
 )
 
 
-def row(actor_id="rog:a", disposition="ready_again", history=None):
+def row(actor_id="fitness-food-coach", disposition="ready_again", history=None):
     return {"actor_id":actor_id,"actor_type":"project","revision":2,
             "disposition":disposition,"state":{"work":"x","history":history or []}}
 
 
-def update(actor_id="rog:a", status="running", state=None, summary="progress", error_reason=None):
+def update(actor_id="fitness-food-coach", status="running", state=None, summary="progress", error_reason=None):
     payload={"actor_id":actor_id,"status":status,"state":state or {"step":2},
              "summary":summary,"error_reason":error_reason}
     return f"{BEGIN_UPDATE}\n{json.dumps(payload)}\n{END_UPDATE}"
@@ -53,26 +53,26 @@ def test_duplicate_input_actor_is_rejected():
 
 def test_strict_valid_parse_and_strip():
     raw="Visible reply\n"+update()
-    parsed=parse_actor_updates(raw,{"rog:a"})
-    assert parsed[0].actor_id == "rog:a" and parsed[0].status == "running"
+    parsed=parse_actor_updates(raw,{"fitness-food-coach"})
+    assert parsed[0].actor_id == "fitness-food-coach" and parsed[0].status == "running"
     assert strip_actor_blocks(raw) == "Visible reply"
 
 
 def test_missing_actor_is_rejected():
-    try: parse_actor_updates(update("rog:a"),{"rog:a","rog:b"})
+    try: parse_actor_updates(update("fitness-food-coach"),{"fitness-food-coach","project-coach"})
     except ActorBlockError as exc: assert "missing actor updates" in str(exc)
     else: raise AssertionError("missing actor was accepted")
 
 
 def test_invalid_json_and_unbalanced_delimiters_are_rejected():
     for raw in (f"{BEGIN_UPDATE}\nnot json\n{END_UPDATE}", f"{BEGIN_UPDATE}\n{{}}"):
-        try: parse_actor_updates(raw,{"rog:a"})
+        try: parse_actor_updates(raw,{"fitness-food-coach"})
         except ActorBlockError: pass
         else: raise AssertionError("malformed actor output was accepted")
 
 
 def test_error_requires_reason():
-    try: parse_actor_updates(update(status="error"),{"rog:a"})
+    try: parse_actor_updates(update(status="error"),{"fitness-food-coach"})
     except ActorBlockError as exc: assert "requires error_reason" in str(exc)
     else: raise AssertionError("reasonless error was accepted")
 
@@ -84,14 +84,32 @@ class _Response:
     def read(self): return json.dumps(self.body).encode()
 
 
+def test_prompt_actor_fetch_is_global_across_instances():
+    captured={}
+    rows=[
+        {"actor_id":"rog:legacy","instance":"rog"},
+        {"actor_id":"aevadim-09:legacy","instance":"aevadim-09"},
+        {"actor_id":"global-coach","instance":"rog"},
+    ]
+    def open_(request,timeout=0):
+        captured["url"]=request.full_url
+        return _Response(rows)
+    with patch.object(config,"SUPABASE_URL","https://example.supabase.co"), \
+         patch.object(config,"SUPABASE_ANON_KEY","key"), \
+         patch("urllib.request.urlopen",open_):
+        assert supabase_client.fetch_prompt_actor_states() == rows
+    assert "actor_state?order=actor_id.asc" in captured["url"]
+    assert "instance=" not in captured["url"]
+
+
 def test_persistence_is_revision_checked_and_appends_bounded_history():
     actor=row(history=[{"n":n} for n in range(60)])
-    parsed=parse_actor_updates(update(status="finished"),{"rog:a"})[0]
+    parsed=parse_actor_updates(update(status="finished"),{"fitness-food-coach"})[0]
     captured={}
     def open_(request,timeout=0):
         captured["url"]=request.full_url
         captured["payload"]=json.loads(request.data)
-        return _Response([{"actor_id":"rog:a","revision":3}])
+        return _Response([{"actor_id":"fitness-food-coach","revision":3}])
     with patch.object(config,"SUPABASE_URL","https://example.supabase.co"), \
          patch.object(config,"SUPABASE_ANON_KEY","key"), \
          patch("urllib.request.urlopen",open_):
@@ -103,7 +121,7 @@ def test_persistence_is_revision_checked_and_appends_bounded_history():
 
 
 def test_persistence_zero_rows_is_visible_failure():
-    parsed=parse_actor_updates(update(),{"rog:a"})[0]
+    parsed=parse_actor_updates(update(),{"fitness-food-coach"})[0]
     with patch.object(config,"SUPABASE_URL","https://example.supabase.co"), \
          patch.object(config,"SUPABASE_ANON_KEY","key"), \
          patch("urllib.request.urlopen",lambda request,timeout=0:_Response([])):
