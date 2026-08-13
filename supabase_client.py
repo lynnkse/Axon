@@ -127,15 +127,16 @@ def _rest_get(path: str, timeout: int = 10):
 
 
 def fetch_actor_states() -> list[dict]:
-    return _rest_get(f"actor_state?instance=eq.{urllib.parse.quote(config.INSTANCE)}&order=actor_id.asc")
+    """Fetch the shared/global actor directory."""
+    return _rest_get("actor_state?order=actor_id.asc")
 
 
 def fetch_prompt_actor_states() -> list[dict] | None:
-    """Strict actor fetch: distinguish a real empty table from fetch failure."""
+    """Strict global actor fetch: distinguish a real empty table from failure."""
     if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
         log.error("Prompt actor fetch unavailable: Supabase is not configured")
         return None
-    path = f"actor_state?instance=eq.{urllib.parse.quote(config.INSTANCE)}&order=actor_id.asc"
+    path = "actor_state?order=actor_id.asc"
     req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
         "apikey": config.SUPABASE_ANON_KEY,
         "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
