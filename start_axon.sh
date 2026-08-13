@@ -44,9 +44,9 @@ start_in_session() {
     if tmux has-session -t "$session" 2>/dev/null; then
         echo "Session '$session' exists — restarting process..."
         # Interrupt whatever is running (two C-c for safety)
-        tmux send-keys -t "$session" "" ""      # send Ctrl-C
+        tmux send-keys -t "$session" C-c
         sleep 0.3
-        tmux send-keys -t "$session" "" ""
+        tmux send-keys -t "$session" C-c
         sleep 0.3
         # Clear the prompt line
         tmux send-keys -t "$session" "q" Enter 2>/dev/null
