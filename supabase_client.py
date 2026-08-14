@@ -158,7 +158,9 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
 
     A false return is always logged by this function and must be treated as a
     visible persistence failure by the caller. Actor history is capped at 50
-    entries in storage; only the newest eight are injected into prompts.
+    lean transition records (status/summary/error only); the current living
+    state is stored once at the top level. Only the newest eight history
+    entries are injected into prompts.
     """
     actor_id = actor_row.get("actor_id")
     revision = int(actor_row.get("revision", 0))
@@ -167,7 +169,7 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
     now = datetime.utcnow().isoformat() + "Z"
     history.append({
         "at": now, "revision": revision + 1, "status": update.status,
-        "summary": update.summary, "state": update.state,
+        "summary": update.summary,
         **({"error_reason": update.error_reason} if update.error_reason else {}),
     })
     state = dict(update.state)

@@ -118,6 +118,13 @@ def test_persistence_is_revision_checked_and_appends_bounded_history():
     assert captured["payload"]["revision"] == 3
     assert captured["payload"]["disposition"] == "completed"
     assert len(captured["payload"]["state"]["history"]) == 50
+    latest = captured["payload"]["state"]["history"][-1]
+    assert latest["revision"] == 3
+    assert latest["status"] == "finished"
+    assert latest["summary"] == "progress"
+    assert "at" in latest
+    assert "state" not in latest
+    assert "error_reason" not in latest
 
 
 def test_persistence_zero_rows_is_visible_failure():
