@@ -153,6 +153,49 @@ def fetch_prompt_actor_states() -> list[dict] | None:
     return rows
 
 
+def _prompt_relevance_exists(path: str) -> bool | None:
+    """Strict, cheap existence probe: None means the gate must fail open."""
+    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+        return None
+    req = urllib.request.Request(
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}",
+        headers={"apikey": config.SUPABASE_ANON_KEY,
+                 "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("Prompt actor relevance probe failed for %s: %s", path, exc)
+        return None
+    return bool(rows) if isinstance(rows, list) else None
+
+
+def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
+    """Actor-type-aware dirty probe; add new actor probes to this dispatcher."""
+    actor_id = str(actor_row.get("actor_id", ""))
+    actor_type = str(actor_row.get("actor_type", ""))
+    kind = "fitness-food-coach" if (
+        actor_id == "fitness-food-coach" or actor_id.endswith(":fitness-food-coach")
+        or actor_type in {"fitness", "fitness-food-coach"}
+    ) else actor_type
+    if kind != "fitness-food-coach":
+        return None
+    since = actor_row.get("last_advanced_at")
+    if not since:
+        return True
+    encoded_since = urllib.parse.quote(str(since), safe="-:TZ.")
+    probes = (
+        f"food_entries?select=id&created_at=gt.{encoded_since}&limit=1",
+        f"fitness_log?select=date&updated_at=gt.{encoded_since}&limit=1",
+    )
+    for path in probes:
+        changed = _prompt_relevance_exists(path)
+        if changed is not False:
+            return changed
+    return False
+
+
 def save_prompt_actor_update(actor_row: dict, update) -> bool:
     """Synchronously CAS-save one validated prompt-embedded actor update.
 
@@ -172,7 +215,12 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
         "summary": update.summary,
         **({"error_reason": update.error_reason} if update.error_reason else {}),
     })
-    state = dict(update.state)
+    # Code is immutable prompt context for this transition. Preserve it from
+    # the row and persist only the model's dynamic data update beside it.
+    from actor_model.prompt_blocks import CODE_STATE_KEYS
+    state = {key: old_state[key] for key in CODE_STATE_KEYS if key in old_state}
+    state.update({key: value for key, value in update.state.items()
+                  if key not in CODE_STATE_KEYS and key != "history"})
     state["history"] = history
     disposition = {"running": "ready_again", "finished": "completed", "error": "blocked"}[update.status]
     payload = {

@@ -6,9 +6,11 @@ timer, poller, scheduler, worker, or additional model call in this module.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,9 @@ MAX_DEPTH = 6
 MAX_UPDATE_JSON_CHARS = 50_000
 MAX_SUMMARY_CHARS = 1_000
 MAX_ERROR_CHARS = 2_000
+ACTOR_DORMANCY_SECONDS = 24 * 60 * 60
+CODE_HASH_TURN_WINDOW = 16
+CODE_STATE_KEYS = ("role", "instructions", "methodology_reference")
 
 _UPDATE_RE = re.compile(
     re.escape(BEGIN_UPDATE) + r"\s*(.*?)\s*" + re.escape(END_UPDATE),
@@ -74,7 +79,55 @@ def active_actor_rows(rows: list[dict], max_slots: int | None = None) -> list[di
     return eligible if max_slots is None else eligible[:max(0, max_slots)]
 
 
-def render_actor_inputs(rows: list[dict]) -> str:
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+
+
+def prompt_actor_rows(
+    rows: list[dict], relevance_check, max_slots: int | None = None,
+    now: datetime | None = None, dormancy_seconds: int = ACTOR_DORMANCY_SECONDS,
+) -> list[dict]:
+    """Gate low-priority actors unless dirty, newly relevant, or dormant.
+
+    Unknown actor types and relevance-check failures fail open: correctness wins
+    over token savings. Nice <= 0 actors always run.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    selected = []
+    for row in active_actor_rows(rows):
+        last_advanced = _parse_timestamp(row.get("last_advanced_at"))
+        must_run = (
+            int(row.get("nice", 0) or 0) <= 0
+            or bool(row.get("dirty"))
+            or last_advanced is None
+            or (now - last_advanced).total_seconds() >= dormancy_seconds
+        )
+        if not must_run:
+            changed = relevance_check(row)
+            must_run = changed is not False
+        if must_run:
+            selected.append(row)
+    return selected if max_slots is None else selected[:max(0, max_slots)]
+
+
+def split_actor_state(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the slow-changing code segment and dynamic data segment."""
+    code = {key: state[key] for key in CODE_STATE_KEYS if key in state}
+    data = {key: value for key, value in state.items()
+            if key not in CODE_STATE_KEYS and key != "history"}
+    return code, data
+
+
+def render_actor_inputs(
+    rows: list[dict], sent_code_hashes: dict[str, int] | None = None,
+    current_turn: int = 0, code_hash_turn_window: int = CODE_HASH_TURN_WINDOW,
+) -> str:
     blocks = []
     seen: set[str] = set()
     for row in active_actor_rows(rows):
@@ -87,15 +140,31 @@ def render_actor_inputs(rows: list[dict]) -> str:
             raise ActorBlockError(f"actor input {actor_id} state must be an object")
         seen.add(actor_id)
         state = dict(row.get("state") or {})
-        history = state.pop("history", [])
+        history = state.get("history", [])
+        code, data = split_actor_state(state)
         payload = {
             "actor_id": actor_id,
             "actor_type": row.get("actor_type"),
             "revision": row.get("revision", 0),
             "status": "running",
-            "state": _bounded(state),
+            "state": _bounded(data),
             "recent_history": _bounded(list(history)[-HISTORY_ENTRIES:]),
         }
+        if code:
+            encoded_code = json.dumps(code, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode()
+            code_hash = hashlib.sha256(encoded_code).hexdigest()[:16]
+            last_sent = sent_code_hashes.get(code_hash) if sent_code_hashes is not None else None
+            if last_sent is not None and current_turn - last_sent <= code_hash_turn_window:
+                payload["code_ref"] = {
+                    "role_hash": code_hash,
+                    "note": "unchanged; already shown above",
+                }
+            else:
+                payload["code"] = _bounded(code)
+                payload["role_hash"] = code_hash
+                if sent_code_hashes is not None:
+                    sent_code_hashes[code_hash] = current_turn
         blocks.append(f"{BEGIN_INPUT}\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n{END_INPUT}")
     if not blocks:
         return ""
@@ -113,7 +182,9 @@ emit exactly one update per input actor using this exact delimiter and JSON shap
 {BEGIN_UPDATE}
 {{"actor_id":"exact input actor_id","status":"running|finished|error","state":{{}},"summary":"short current summary","error_reason":null}}
 {END_UPDATE}
-Use running when more work remains, finished when no more work is needed, and error
+The input state is dynamic data only. Static code/role fields are preserved by the
+runtime; do not echo them into state. Use running when more work remains, finished
+when no more work is needed, and error
 only for a broken state (include a non-empty error_reason). Preserve useful state;
 do not emit markdown fences around the JSON. Never create an actor not present in
 the input and never omit an input actor.
