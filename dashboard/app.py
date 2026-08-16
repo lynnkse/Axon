@@ -573,11 +573,11 @@ with tab_alive:
 # ── Tab: Actors ───────────────────────────────────────────────────────────────
 with tab_actors:
     st.subheader("Actor Memory Blocks")
-    st.caption("Each block is one persistent actor thread. Open it to inspect current memory and its complete assigned event stream.")
+    st.caption("Each block is one persistent actor thread, global/shared across instances. Open it to inspect current memory and its complete assigned event stream.")
     actors = _sb_get(
         "actor_state",
-        f"instance=eq.{urllib.parse.quote(AXON_INSTANCE)}&order=actor_id.asc"
-        "&select=actor_id,actor_type,disposition,revision,state,directory_projection,last_advanced_at",
+        "order=actor_id.asc"
+        "&select=actor_id,actor_type,disposition,revision,state,directory_projection,last_advanced_at,nice",
     )
     if actors:
         disposition_colors = {
@@ -590,8 +590,9 @@ with tab_actors:
             actor_type = actor.get("actor_type", "unknown")
             disposition = actor.get("disposition", "unknown")
             revision = actor.get("revision", 0)
+            nice = actor.get("nice", 0)
             summary = (actor.get("directory_projection") or {}).get("summary", "")
-            label = f"▦  {actor_type}  ·  {actor_id}  ·  {disposition}  ·  rev {revision}"
+            label = f"▦  {actor_type}  ·  {actor_id}  ·  {disposition}  ·  rev {revision}  ·  nice {nice}"
             with st.expander(label, expanded=False):
                 badges = (_badge(disposition, disposition_colors.get(disposition, "#6B7A8F"))
                           + _badge(f"revision {revision}", "#7651A8")
@@ -630,7 +631,7 @@ with tab_actors:
                 else:
                     st.caption("No assigned journal events yet.")
     else:
-        st.info("No actor rows for this instance. Apply the migration and run the backfill first.")
+        st.info("No actor rows. Apply the migration and run the backfill first.")
 
     if st.button("🔄 Refresh actors"):
         st.rerun()
@@ -871,7 +872,11 @@ digraph corrected_actor_boundary {
         st.markdown("#### Prompt-embedded actors · input and output contract")
         st.caption(
             "One normal conversational call carries every selected actor block in and every updated actor block out. "
-            "The active count is flexible; when capacity is limited, crucial work is selected without starving eligible actors."
+            "Capacity (MAX_ACTOR_SLOTS) is filled by lowest `nice` first, Linux-style. Below the cap, a dirty-bit gate "
+            "skips including a low-priority actor's block at all when nothing relevant changed since its last pass "
+            "(e.g. no new food_entries/fitness_log rows) — this is a real prompt-token omission, not a lighter pass. "
+            "Static role/instruction text is hashed per actor; a hash already sent earlier in the same session is "
+            "replaced with a compact reference instead of resending the full text."
         )
         st.graphviz_chart(r'''
 digraph prompt_actor_contract {

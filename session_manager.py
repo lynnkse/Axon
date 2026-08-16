@@ -49,8 +49,9 @@ from typing import Optional
 import config
 import supabase_client
 from actor_model.prompt_blocks import (
-    ActorBlockError, active_actor_rows, output_instructions, parse_actor_updates,
-    render_actor_inputs, strip_actor_blocks,
+    ActorBlockError, CODE_HASH_TURN_WINDOW, output_instructions,
+    parse_actor_updates, prompt_actor_rows, render_actor_inputs,
+    strip_actor_blocks,
 )
 
 logging.basicConfig(
@@ -117,6 +118,11 @@ class SessionManagerNode:
         # until a decision arrives (from Telegram or CLI).
         self._permission_conn: Optional[socket.socket] = None
         self._permission_lock = threading.Lock()
+
+        # Per-Claude-session code-segment cache. A hash remains reusable for 16
+        # real user turns, a conservative approximation of unsummarized context.
+        self._actor_prompt_turn = 0
+        self._actor_code_hash_turns: dict[str, int] = {}
 
         self._running = True
         self._reader_thread: Optional[threading.Thread] = None
@@ -544,6 +550,8 @@ class SessionManagerNode:
             self.current_session_id = existing_session
             log.info(f"Resuming session: {existing_session[:8]}...")
         else:
+            self._actor_prompt_turn = 0
+            self._actor_code_hash_turns.clear()
             log.info("Starting new session (ID captured on first response)")
 
         system_prompt = self._build_system_prompt()
@@ -1021,9 +1029,9 @@ class SessionManagerNode:
             prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
 
             # Actors are fetched exactly once, only while handling a real user
-            # prompt. Every non-terminal actor is included; an empty table adds
-            # nothing. Rows are retained on the QueueItem for strict response
-            # validation and revision-checked persistence after this same call.
+            # prompt. Low-priority actors are omitted when their deterministic
+            # data-source probes are clean; dirty/new/dormant actors fail into a
+            # real pass. Rows are retained for strict response validation/CAS.
             actor_rows = []
             actor_context = ""
             is_real_user_prompt = item.source not in {"reflection", "proactive", "system"}
@@ -1033,9 +1041,20 @@ class SessionManagerNode:
                     log.error("Prompt actor injection skipped because actor_state fetch failed")
                 else:
                     try:
-                        actor_rows = active_actor_rows(
-                            fetched_actor_rows, max_slots=config.MAX_ACTOR_SLOTS)
-                        actor_context = render_actor_inputs(actor_rows)
+                        self._actor_prompt_turn += 1
+                        actor_rows = prompt_actor_rows(
+                            fetched_actor_rows,
+                            supabase_client.prompt_actor_relevance_changed,
+                            max_slots=config.MAX_ACTOR_SLOTS,
+                        )
+                        actor_context = render_actor_inputs(
+                            actor_rows, self._actor_code_hash_turns,
+                            current_turn=self._actor_prompt_turn,
+                        )
+                        self._actor_code_hash_turns = {
+                            code_hash: turn for code_hash, turn in self._actor_code_hash_turns.items()
+                            if self._actor_prompt_turn - turn <= CODE_HASH_TURN_WINDOW
+                        }
                     except ActorBlockError as exc:
                         actor_rows = []
                         log.error("Prompt actor inputs rejected: %s", exc)

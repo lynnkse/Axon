@@ -1,17 +1,19 @@
 import json
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import config
 import supabase_client
 from actor_model.prompt_blocks import (
     ActorBlockError, BEGIN_UPDATE, END_UPDATE, active_actor_rows,
-    parse_actor_updates, render_actor_inputs, strip_actor_blocks,
+    parse_actor_updates, prompt_actor_rows, render_actor_inputs, strip_actor_blocks,
 )
 
 
 def row(actor_id="fitness-food-coach", disposition="ready_again", history=None):
-    return {"actor_id":actor_id,"actor_type":"project","revision":2,
-            "disposition":disposition,"state":{"work":"x","history":history or []}}
+    return {"actor_id":actor_id,"actor_type":"fitness-food-coach","revision":2,
+            "disposition":disposition,"nice":10,
+            "state":{"role":"static coach instructions","work":"x","history":history or []}}
 
 
 def update(actor_id="fitness-food-coach", status="running", state=None, summary="progress", error_reason=None):
@@ -43,6 +45,30 @@ def test_input_history_is_bounded_to_eight():
     payload=json.loads(text.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
     assert [entry["n"] for entry in payload["recent_history"]] == list(range(4,12))
     assert "history" not in payload["state"]
+
+
+def test_dirty_gate_skips_clean_low_priority_but_includes_dirty_new_and_dormant():
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    clean = {**row("clean"), "last_advanced_at":"2026-08-14T11:00:00Z"}
+    dirty = {**row("dirty"), "dirty":True, "last_advanced_at":"2026-08-14T11:00:00Z"}
+    new = row("new")
+    dormant = {**row("dormant"), "last_advanced_at":"2026-08-12T11:00:00Z"}
+    calls=[]
+    selected=prompt_actor_rows([clean,dirty,new,dormant],lambda actor:calls.append(actor["actor_id"]) or False,now=now)
+    assert [actor["actor_id"] for actor in selected] == ["dirty","dormant","new"]
+    assert calls == ["clean"]
+
+
+def test_code_hash_replaces_repeated_static_role_with_compact_reference():
+    sent={}
+    first=render_actor_inputs([row()],sent,current_turn=1)
+    second=render_actor_inputs([row()],sent,current_turn=2)
+    first_payload=json.loads(first.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
+    second_payload=json.loads(second.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
+    assert first_payload["code"] == {"role":"static coach instructions"}
+    assert "role" not in first_payload["state"]
+    assert second_payload["code_ref"]["role_hash"] == first_payload["role_hash"]
+    assert "code" not in second_payload
 
 
 def test_duplicate_input_actor_is_rejected():
@@ -102,6 +128,18 @@ def test_prompt_actor_fetch_is_global_across_instances():
     assert "instance=" not in captured["url"]
 
 
+def test_fitness_actor_relevance_probes_food_and_fitness_timestamps():
+    actor={**row(),"last_advanced_at":"2026-08-14T10:00:00+00:00"}
+    paths=[]
+    with patch.object(supabase_client,"_prompt_relevance_exists",
+                      lambda path: paths.append(path) or False):
+        assert supabase_client.prompt_actor_relevance_changed(actor) is False
+    assert paths == [
+        "food_entries?select=id&created_at=gt.2026-08-14T10:00:00%2B00:00&limit=1",
+        "fitness_log?select=date&updated_at=gt.2026-08-14T10:00:00%2B00:00&limit=1",
+    ]
+
+
 def test_persistence_is_revision_checked_and_appends_bounded_history():
     actor=row(history=[{"n":n} for n in range(60)])
     parsed=parse_actor_updates(update(status="finished"),{"fitness-food-coach"})[0]
@@ -117,7 +155,15 @@ def test_persistence_is_revision_checked_and_appends_bounded_history():
     assert "revision=eq.2" in captured["url"]
     assert captured["payload"]["revision"] == 3
     assert captured["payload"]["disposition"] == "completed"
+    assert captured["payload"]["state"]["role"] == "static coach instructions"
     assert len(captured["payload"]["state"]["history"]) == 50
+    latest = captured["payload"]["state"]["history"][-1]
+    assert latest["revision"] == 3
+    assert latest["status"] == "finished"
+    assert latest["summary"] == "progress"
+    assert "at" in latest
+    assert "state" not in latest
+    assert "error_reason" not in latest
 
 
 def test_persistence_zero_rows_is_visible_failure():

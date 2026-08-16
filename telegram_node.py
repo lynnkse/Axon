@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -326,13 +327,48 @@ def _is_authorized(update: Update) -> bool:
     return uid == AUTHORIZED_USER_ID or uid in _extra_ids
 
 
-async def _typing_keepalive(update: Update, context: ContextTypes.DEFAULT_TYPE, stop_event: asyncio.Event):
-    """Send typing action every 4s until stop_event is set."""
+_ACTIVITY_IDLE_THRESHOLD = 75.0
+
+
+@dataclass
+class ActivityTracker:
+    """Per-request monotonic activity clock shared by response/status tasks."""
+    started_at: float = field(default_factory=time.monotonic)
+    last_activity_time: Optional[float] = None
+
+    def mark_activity(self, now: Optional[float] = None) -> None:
+        self.last_activity_time = time.monotonic() if now is None else now
+
+    def idle_seconds(self, now: Optional[float] = None) -> float:
+        current = time.monotonic() if now is None else now
+        reference = self.started_at if self.last_activity_time is None else self.last_activity_time
+        return max(0.0, current - reference)
+
+
+def _activity_state(
+    tracker: ActivityTracker, now: Optional[float] = None,
+    idle_threshold: float = _ACTIVITY_IDLE_THRESHOLD,
+) -> tuple[str, float]:
+    idle = tracker.idle_seconds(now)
+    if idle >= idle_threshold:
+        return "stalled", idle
+    if tracker.last_activity_time is not None:
+        return "working", idle
+    return "waiting", idle
+
+
+async def _typing_keepalive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, stop_event: asyncio.Event,
+    activity_tracker: Optional[ActivityTracker] = None,
+):
+    """Send typing every 4s while waiting, except after activity goes stale."""
     while not stop_event.is_set():
-        try:
-            await update.effective_message.reply_chat_action("typing")
-        except Exception:
-            pass
+        state = _activity_state(activity_tracker)[0] if activity_tracker else "working"
+        if state != "stalled":
+            try:
+                await update.effective_message.reply_chat_action("typing")
+            except Exception:
+                pass
         try:
             await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4.0)
         except asyncio.TimeoutError:
@@ -345,7 +381,7 @@ _RESPONSE_TIMEOUT = 720.0  # 12 min (session_manager times out at 10 min)
 async def _wait_for_response(
     subscriber: ResponseSubscriber,
     source: str,
-    activity_event: Optional[asyncio.Event] = None,
+    activity_tracker: Optional[ActivityTracker] = None,
 ) -> str:
     """Wait for next response from SessionManager with matching source.
 
@@ -368,8 +404,8 @@ async def _wait_for_response(
         except asyncio.TimeoutError:
             continue
         if msg.get("type") == "activity":
-            if activity_event and msg.get("growing"):
-                activity_event.set()
+            if activity_tracker and msg.get("growing"):
+                activity_tracker.mark_activity()
             continue
         msg_source = msg.get("source")
         if msg_source != source:
@@ -384,15 +420,15 @@ async def _wait_for_response(
 async def _status_notifier(
     update: Update,
     stop_event: asyncio.Event,
-    activity_event: Optional[asyncio.Event] = None,
+    activity_tracker: Optional[ActivityTracker] = None,
     initial_delay: float = 15.0,
     interval: float = 60.0,
+    idle_threshold: float = _ACTIVITY_IDLE_THRESHOLD,
 ):
     """
-    After initial_delay, send a status message based on actual JSONL activity.
-    - No activity seen: warn that Claude may not have received the message.
-    - Activity seen: confirm Claude is working.
-    Then repeat every interval seconds with current state.
+    Report working/waiting/stalled from time since the latest JSONL growth.
+    Polling is cheap and lets the stalled transition appear promptly even when
+    activity happens between the longer user-facing status intervals.
     """
     try:
         await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=initial_delay)
@@ -402,31 +438,34 @@ async def _status_notifier(
     if stop_event.is_set():
         return
 
-    elapsed = int(initial_delay)
-    if activity_event and activity_event.is_set():
-        msg = f"⏳ Claude is working... ({elapsed}s)"
-    else:
-        msg = "⚠️ Claude hasn't started responding — the message may not have been received."
-    try:
-        await update.effective_message.reply_text(msg)
-    except Exception:
-        pass
-
+    tracker = activity_tracker or ActivityTracker()
+    last_report_at = 0.0
+    last_reported_state: Optional[str] = None
     while not stop_event.is_set():
+        now = time.monotonic()
+        state, idle = _activity_state(tracker, now, idle_threshold)
+        should_report = state != last_reported_state or now - last_report_at >= interval
+        if should_report:
+            elapsed = int(now - tracker.started_at)
+            if state == "working":
+                status = f"⏳ Claude is working... ({elapsed}s; activity {int(idle)}s ago)"
+            elif state == "stalled":
+                status = (
+                    f"⚠️ No response from Claude in {int(idle)}s — "
+                    "it may have crashed; consider /restart"
+                )
+            else:
+                status = "⚠️ Claude hasn't started responding — the message may not have been received."
+            try:
+                await update.effective_message.reply_text(status)
+            except Exception:
+                pass
+            last_report_at = now
+            last_reported_state = state
         try:
-            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=interval)
+            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=2.0)
             return
         except asyncio.TimeoutError:
-            elapsed += int(interval)
-        if stop_event.is_set():
-            return
-        if activity_event and activity_event.is_set():
-            status = f"⏳ Claude is working... ({elapsed}s)"
-        else:
-            status = f"⚠️ Still no response from Claude ({elapsed}s) — consider /restart"
-        try:
-            await update.effective_message.reply_text(status)
-        except Exception:
             pass
 
 
@@ -450,18 +489,18 @@ async def _handle_and_reply(
 
     async with _get_message_lock():
         stop_typing = asyncio.Event()
-        activity_event = asyncio.Event()
+        activity_tracker = ActivityTracker()
         typing_task = asyncio.create_task(
-            _typing_keepalive(update, context, stop_typing)
+            _typing_keepalive(update, context, stop_typing, activity_tracker)
         )
         status_task = asyncio.create_task(
-            _status_notifier(update, stop_typing, activity_event)
+            _status_notifier(update, stop_typing, activity_tracker)
         )
 
         _send_to_session_manager(text, source, user_id, media_path)
 
         try:
-            raw = await _wait_for_response(subscriber, source, activity_event)
+            raw = await _wait_for_response(subscriber, source, activity_tracker)
         finally:
             stop_typing.set()
             for t in (typing_task, status_task):
