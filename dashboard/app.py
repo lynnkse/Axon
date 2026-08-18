@@ -9,7 +9,7 @@ import os
 import html
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -34,7 +34,13 @@ def _load_env():
 
 _env = _load_env()
 SUPABASE_URL = os.environ.get("SUPABASE_URL") or _env.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or _env.get("SUPABASE_ANON_KEY", "")
+# service_role bypasses RLS -- required since food_entries/fitness_log/
+# compulsive_behavior_tracking only grant SELECT to authenticated/service_role,
+# not anon. Falls back to the anon key if service_role isn't set yet.
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or _env.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    or os.environ.get("SUPABASE_ANON_KEY") or _env.get("SUPABASE_ANON_KEY", "")
+)
 # Instance label (2026-08-09): shown in the page title so it's obvious at a
 # glance which machine's dashboard you're looking at -- same AXON_INSTANCE
 # convention as config.py, with hostname fallback if unset.
@@ -308,6 +314,40 @@ div[data-testid="stExpanderDetails"] { padding: 14px 16px 16px; }
 }
 .project-stage.done .project-stage-name { color: #b5e9d7; }
 .project-stage.in-progress .project-stage-name { color: #dadaff; font-weight: 760; }
+
+/* Anton state: cyber-dojo discipline board */
+.dojo-shell {
+  position: relative; overflow: hidden; margin: 0 0 20px; padding: 24px 26px;
+  border: 1px solid rgba(100,216,236,.28); border-radius: 16px;
+  background: linear-gradient(125deg, rgba(13,22,29,.98), rgba(19,15,30,.96));
+  box-shadow: 0 0 34px rgba(100,216,236,.08), inset 0 1px rgba(255,255,255,.04);
+}
+.dojo-shell::after {
+  content: "道"; position: absolute; right: 24px; top: -20px;
+  color: rgba(100,216,236,.055); font: 800 128px/1 ui-serif, Georgia, serif;
+}
+.dojo-eyebrow, .dojo-label {
+  color: #64d8ec; font: 720 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .16em; text-transform: uppercase;
+}
+.dojo-title { margin: 5px 0; color: #f1f7fb; font-size: 30px; font-weight: 790; letter-spacing: -.035em; }
+.dojo-subtitle { max-width: 700px; color: #9eafbd; font-size: 15px; }
+.dojo-card {
+  min-height: 150px; margin: 4px 0 14px; padding: 17px 18px;
+  border: 1px solid rgba(100,216,236,.17); border-top: 2px solid #64d8ec;
+  border-radius: 13px; background: rgba(14,20,28,.82);
+  box-shadow: 0 10px 28px rgba(0,0,0,.2), 0 0 20px rgba(100,216,236,.045);
+}
+.dojo-card.avoid { border-top-color: #ff5fc8; box-shadow: 0 0 22px rgba(255,95,200,.05); }
+.dojo-card.build { border-top-color: #4dd4a7; box-shadow: 0 0 22px rgba(77,212,167,.05); }
+.dojo-value { margin: 12px 0 3px; color: #f4fbff; font: 780 34px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dojo-value span { color: #82909e; font-size: 13px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+.dojo-detail { color: #9eafbd; font-size: 14px; line-height: 1.5; }
+.dojo-belt { height: 5px; margin-top: 14px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; }
+.dojo-belt > i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#4dd4a7,#64d8ec); box-shadow: 0 0 12px #64d8ec; }
+.dojo-belt.avoid > i { background: linear-gradient(90deg,#ff5fc8,#9b7cff); box-shadow: 0 0 12px #ff5fc8; }
+.dojo-section { margin: 24px 0 10px; color: #dce9ef; font: 760 16px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; }
+.dojo-actor { border-left-color: #64d8ec; background: linear-gradient(110deg,rgba(100,216,236,.06),rgba(139,140,255,.04)); }
 .stage-detail-heading {
   display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
   color: #dadaff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -429,8 +469,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database"]
+tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database"]
 )
 
 MANIM_OUTPUT = Path.home() / "Axon/manim/output"
@@ -568,6 +608,179 @@ with tab_alive:
         st.info("No alive state data.")
 
     if st.button("🔄 Refresh state"):
+        st.rerun()
+
+# ── Tab: Anton State ──────────────────────────────────────────────────────────
+with tab_anton:
+    st.markdown(
+        '<div class="dojo-shell"><div class="dojo-eyebrow">Discipline telemetry · cyber dojo</div>'
+        '<div class="dojo-title">Anton State 道</div>'
+        '<div class="dojo-subtitle">Concrete signals only. Avoid streaks reset on logged incidents; '
+        'build practices compound through steady repetition.</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    def _event_date(row):
+        # event_date is when the behavior actually happened; created_at is
+        # only when it was logged, which can differ for retrospective entries.
+        raw = row.get("event_date") or row.get("created_at") or row.get("date") or row.get("logged_at")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+        except (TypeError, ValueError):
+            return None
+
+    def _normalized_value(row, *keys):
+        for key in keys:
+            if row.get(key) is not None:
+                return str(row[key]).strip().lower().replace("_", " ").replace("-", " ")
+        return ""
+
+    behavior_rows = _sb_get("compulsive_behavior_tracking", "order=created_at.desc")
+    today_date = date.today()
+    avoid_behaviors = {
+        "Weed": ("weed", "cannabis", "marijuana"),
+        "Nail biting": ("nail biting", "nailbiting", "nails"),
+        "Porn": ("porn", "pornography"),
+    }
+
+    st.markdown('<div class="dojo-section">01 // AVOID · ZERO TARGET</div>', unsafe_allow_html=True)
+    avoid_columns = st.columns(3)
+    for column, (label, aliases) in zip(avoid_columns, avoid_behaviors.items()):
+        incidents = []
+        for event in behavior_rows:
+            behavior = _normalized_value(event, "behavior", "behavior_name", "behavior_type", "name")
+            event_kind = _normalized_value(event, "event_type", "event", "status", "type", "action")
+            if any(alias in behavior for alias in aliases) and event_kind in {"relapse", "incident"}:
+                event_day = _event_date(event)
+                if event_day:
+                    incidents.append(event_day)
+        last_incident = max(incidents) if incidents else None
+        streak = max(0, (today_date - last_incident).days) if last_incident else None
+        value = f"{streak}" if streak is not None else "—"
+        detail = (f"Last incident · {last_incident.isoformat()}" if last_incident
+                  else "No relapse or incident is logged yet")
+        belt_width = min(100, 8 + (streak or 0) * 4) if streak is not None else 0
+        column.markdown(
+            f'<div class="dojo-card avoid"><div class="dojo-label">{html.escape(label)}</div>'
+            f'<div class="dojo-value">{value} <span>clean days</span></div>'
+            f'<div class="dojo-detail">{html.escape(detail)}</div>'
+            f'<div class="dojo-belt avoid"><i style="width:{belt_width}%"></i></div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="dojo-section">02 // BUILD · COMPOUND PRACTICE</div>', unsafe_allow_html=True)
+    recent_days = 14
+    recent_cutoff = today_date - timedelta(days=recent_days - 1)
+    practices = []
+    for event in behavior_rows:
+        behavior = _normalized_value(event, "behavior", "behavior_name", "behavior_type", "name")
+        event_kind = _normalized_value(event, "event_type", "event", "status", "type", "action")
+        event_day = _event_date(event)
+        if (event_day and event_kind == "positive practice"
+                and any(token in behavior for token in ("wim hof", "breathing", "breathwork"))):
+            practices.append(event_day)
+    practice_days = {day for day in practices if day >= recent_cutoff}
+    last_practice = max(practices) if practices else None
+    days_since_practice = ((today_date - last_practice).days if last_practice else None)
+
+    food_rows = _sb_get(
+        "food_entries",
+        f"date=gte.{recent_cutoff.isoformat()}&order=date.asc&select=date,calories",
+    )
+    calories_by_day = {}
+    for entry in food_rows:
+        day = str(entry.get("date") or "")
+        if day:
+            calories_by_day[day] = calories_by_day.get(day, 0) + float(entry.get("calories") or 0)
+    target_days = sum(1800 <= kcal <= 1900 for kcal in calories_by_day.values())
+    acceptable_days = sum(1900 < kcal <= 2000 for kcal in calories_by_day.values())
+    steady_days = target_days + acceptable_days
+
+    workout_cutoff = today_date - timedelta(days=7)
+    workout_rows = _sb_get(
+        "fitness_log",
+        f"date=gte.{workout_cutoff.isoformat()}&order=date.desc&select="
+        "date,pushups_sets,pullups_sets,pistol_sets",
+    )
+    workout_sets = sum(
+        int(row.get("pushups_sets") or 0)
+        + int(row.get("pullups_sets") or 0)
+        + int(row.get("pistol_sets") or 0)
+        for row in workout_rows
+    )
+
+    build_columns = st.columns(3)
+    practice_value = str(days_since_practice) if days_since_practice is not None else "—"
+    practice_detail = (f"{len(practice_days)} of the last {recent_days} days logged"
+                       if last_practice else "No positive practice is logged yet")
+    build_columns[0].markdown(
+        f'<div class="dojo-card build"><div class="dojo-label">Wim Hof breathing</div>'
+        f'<div class="dojo-value">{practice_value} <span>days since</span></div>'
+        f'<div class="dojo-detail">{html.escape(practice_detail)}</div>'
+        f'<div class="dojo-belt"><i style="width:{min(100, len(practice_days) / recent_days * 100):.0f}%"></i></div></div>',
+        unsafe_allow_html=True,
+    )
+    build_columns[1].markdown(
+        f'<div class="dojo-card build"><div class="dojo-label">Calorie steadiness</div>'
+        f'<div class="dojo-value">{steady_days}<span> / {len(calories_by_day)} logged days</span></div>'
+        f'<div class="dojo-detail">{target_days} at 1800–1900 · {acceptable_days} acceptable to 2000</div>'
+        f'<div class="dojo-belt"><i style="width:{min(100, steady_days / max(1, len(calories_by_day)) * 100):.0f}%"></i></div></div>',
+        unsafe_allow_html=True,
+    )
+    build_columns[2].markdown(
+        f'<div class="dojo-card build"><div class="dojo-label">Workout volume · 7 days</div>'
+        f'<div class="dojo-value">{workout_sets}<span> / 60 sets</span></div>'
+        f'<div class="dojo-detail">Push-ups · pull-ups · pistol sets</div>'
+        f'<div class="dojo-belt"><i style="width:{min(100, workout_sets / 60 * 100):.0f}%"></i></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if calories_by_day:
+        chart_days = sorted(calories_by_day)
+        chart_values = [calories_by_day[day] for day in chart_days]
+        chart_colors = [
+            "#4dd4a7" if 1800 <= value <= 1900 else "#64d8ec" if 1900 < value <= 2000 else "#ff5fc8"
+            for value in chart_values
+        ]
+        fig = go.Figure(go.Bar(x=chart_days, y=chart_values, marker_color=chart_colors))
+        fig.add_hrect(y0=1800, y1=1900, fillcolor="#4dd4a7", opacity=.08, line_width=0)
+        fig.add_hline(y=2000, line_color="#64d8ec", line_dash="dot", opacity=.7)
+        fig.update_layout(
+            title="Calorie discipline · recent logged days", height=280,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#aebdca", margin=dict(t=45, b=25, l=20, r=15),
+            xaxis=dict(gridcolor="rgba(255,255,255,.04)"),
+            yaxis=dict(title="kcal", gridcolor="rgba(255,255,255,.06)"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('<div class="dojo-section">03 // ACTOR READOUT</div>', unsafe_allow_html=True)
+    actor_rows = _sb_get(
+        "actor_state",
+        "actor_type=eq.anton-state-tracker&order=last_advanced_at.desc.nullslast&limit=1"
+        "&select=actor_id,actor_type,disposition,revision,state,directory_projection,last_advanced_at",
+    )
+    if actor_rows:
+        actor = actor_rows[0]
+        projection = actor.get("directory_projection") or {}
+        summary = projection.get("summary") or (actor.get("state") or {}).get("summary") or "No summary yet."
+        st.markdown(
+            '<div class="memory-block dojo-actor">'
+            f'<div class="memory-id">{html.escape(str(actor.get("actor_id", "anton-state-tracker")))}</div>'
+            f'<div style="margin:8px 0;color:#e9f5fa;font-size:16px;">{html.escape(str(summary))}</div>'
+            f'<div class="memory-meta">{html.escape(str(actor.get("disposition", "—")))} · '
+            f'revision {html.escape(str(actor.get("revision", 0)))} · last advanced '
+            f'{html.escape(str(actor.get("last_advanced_at") or "never"))}</div></div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("Inspect full anton-state-tracker state"):
+            st.json(actor.get("state") or {})
+    else:
+        st.info("anton-state-tracker actor state is not available.")
+
+    if st.button("🔄 Refresh Anton state"):
         st.rerun()
 
 # ── Tab: Actors ───────────────────────────────────────────────────────────────
