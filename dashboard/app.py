@@ -469,9 +469,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database"]
+tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
 )
+
+AILIN_DIR = Path.home() / "cognitive-hq/ailin"
 
 MANIM_OUTPUT = Path.home() / "Axon/manim/output"
 MANIM_SCENES = Path.home() / "Axon/manim/scenes"
@@ -1497,3 +1499,68 @@ digraph schema_knowledge {
   study -> research [style=invis, weight=3];
 }
 ''', use_container_width=True)
+
+# ── Tab: Ailin (Axon-Native Rebuild) ─────────────────────────────────────────
+with tab_ailin:
+    st.subheader("🧬 Ailin — Axon-Native Rebuild")
+    st.caption(
+        "Design doc + schema for the rebuilt Ailin (separate Supabase project, "
+        "not the legacy Ollama/Leonid deployment). Source: ~/cognitive-hq/ailin/"
+    )
+
+    ailin_design, ailin_schema = st.tabs(["Design & Status", "Schema Diagram"])
+
+    with ailin_design:
+        design_path = AILIN_DIR / "DESIGN.md"
+        if design_path.exists():
+            st.markdown(design_path.read_text(encoding="utf-8", errors="replace"))
+        else:
+            st.warning(f"DESIGN.md not found at {design_path}")
+
+    with ailin_schema:
+        st.caption("10 tables in the `ailin` Supabase project (ref wmvfsjegeeissxcnszik) · applied 2026-08-20")
+        st.graphviz_chart(r'''
+digraph ailin_schema {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.65, ranksep=0.9,
+         fontname="Arial", label="AILIN — AXON-NATIVE SCHEMA", labelloc=t, fontsize=20, fontcolor="#E88BC9"];
+  node [shape=plain, fontname="Arial"];
+  edge [color="#D86FB0", penwidth=2.0, arrowsize=0.85, fontname="Courier New", fontsize=9, fontcolor="#E7A8D0"];
+
+  interaction [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#B85597" BGCOLOR="#1a1420">
+      <TR><TD BGCOLOR="#8A3D74"><FONT COLOR="white"><B>INTERACTION</B></FONT></TD></TR>
+      <TR><TD PORT="conversations"><FONT COLOR="#F0E5EC">conversations</FONT></TD></TR>
+      <TR><TD PORT="dreams"><FONT COLOR="#F0E5EC">dreams</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  affect [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#B85597" BGCOLOR="#1a1420">
+      <TR><TD BGCOLOR="#8A3D74"><FONT COLOR="white"><B>AFFECT / RUNTIME STATE</B></FONT></TD></TR>
+      <TR><TD PORT="valence"><FONT COLOR="#F0E5EC">valence</FONT></TD></TR>
+      <TR><TD PORT="body_state"><FONT COLOR="#F0E5EC">body_state</FONT></TD></TR>
+      <TR><TD PORT="belief_state"><FONT COLOR="#F0E5EC">belief_state *</FONT></TD></TR>
+      <TR><TD PORT="active_conditions"><FONT COLOR="#F0E5EC">active_conditions *</FONT></TD></TR>
+      <TR><TD PORT="q_learning"><FONT COLOR="#F0E5EC">q_learning</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  persona [label=<
+    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#B85597" BGCOLOR="#1a1420">
+      <TR><TD BGCOLOR="#8A3D74"><FONT COLOR="white"><B>PERSONA / WORLD</B></FONT></TD></TR>
+      <TR><TD PORT="identity"><FONT COLOR="#F0E5EC">identity</FONT></TD></TR>
+      <TR><TD PORT="world"><FONT COLOR="#F0E5EC">world</FONT></TD></TR>
+      <TR><TD PORT="principal_model"><FONT COLOR="#F0E5EC">principal_model</FONT></TD></TR>
+    </TABLE>
+  >];
+
+  interaction -> affect [style=invis, weight=3];
+  affect -> persona [style=invis, weight=3];
+}
+''', use_container_width=True)
+        st.caption("* belief_state and active_conditions were not in the original 8-table scope — added after inspecting the real legacy state.json, which tracks both as live runtime state.")
+        st.markdown(
+            "Every table has an `origin` column (`supabase_native` | `legacy_seagate_migrated`) "
+            "and RLS enabled. `conversations` and `dreams` have `vector(1536)` embedding columns "
+            "with HNSW indexes for semantic search (pgvector, same pattern as Axon's own `messages` table)."
+        )

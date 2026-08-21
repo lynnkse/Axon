@@ -18,7 +18,7 @@ import logging
 import re
 import threading
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 from typing import Optional
@@ -171,6 +171,9 @@ def _prompt_relevance_exists(path: str) -> bool | None:
     return bool(rows) if isinstance(rows, list) else None
 
 
+AILIN_PULSE_COOLDOWN_SECONDS = 45 * 60  # min gap between internal ticks sent to Ailin's own session
+
+
 def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
     """Actor-type-aware dirty probe; add new actor probes to this dispatcher."""
     actor_id = str(actor_row.get("actor_id", ""))
@@ -179,6 +182,20 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
         actor_id == "fitness-food-coach" or actor_id.endswith(":fitness-food-coach")
         or actor_type in {"fitness", "fitness-food-coach"}
     ) else actor_type
+    if kind == "ailin-tick-actor":
+        # Not a data-freshness probe -- this actor is a pacing flag for Ailin's
+        # separate standalone session (see ailin_session_manager pulses). Fires
+        # on a wall-clock cooldown only, independent of any table content.
+        since = actor_row.get("last_advanced_at")
+        if not since:
+            return True
+        try:
+            last = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            last = last.replace(tzinfo=last.tzinfo or timezone.utc).astimezone(timezone.utc)
+        except ValueError:
+            return True
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        return elapsed >= AILIN_PULSE_COOLDOWN_SECONDS
     if kind not in {"fitness-food-coach", "anton-state-tracker"}:
         return None
     since = actor_row.get("last_advanced_at")

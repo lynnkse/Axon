@@ -1119,6 +1119,34 @@ class SessionManagerNode:
     # Response publishing
     # ------------------------------------------------------------------
 
+    # Ailin (2026-08-21) is a fully standalone deployment -- own bot, own
+    # session, own Supabase project. This is a fire-and-forget pulse only:
+    # Axon's own liveliness is her heartbeat since she has no scheduler of
+    # her own, but the pulse must never block or fail Axon's own turn.
+    AILIN_USER_INPUT_SOCK = config.get("AILIN_USER_INPUT_SOCK", "/tmp/ailin/user_input.sock")
+    AILIN_PULSE_TEXT = (
+        "[INTERNAL_TICK -- no one is present, this is background time passing, "
+        "not a message from Anton. Let valence/body_state decay toward baseline "
+        "as usual for idle time. You may write a dream if something genuinely "
+        "surfaces; most ticks won't need one. No reply needs to be shown to anyone."
+    )
+
+    def _pulse_ailin(self):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(self.AILIN_USER_INPUT_SOCK)
+            payload = json.dumps({
+                "text": self.AILIN_PULSE_TEXT,
+                "source": "reflection",
+                "user_id": "internal",
+            })
+            sock.sendall((payload + "\n").encode())
+            sock.close()
+            log.info("Pulsed Ailin's session (internal tick)")
+        except Exception as exc:
+            log.warning("Ailin pulse skipped (her session may be down): %s", exc)
+
     def _publish_response(self, item: QueueItem, response_text: str):
         actor_rows = item.prompt_actor_rows or []
         expected_actor_ids = {str(row.get("actor_id")) for row in actor_rows}
@@ -1137,6 +1165,10 @@ class SessionManagerNode:
                     log.error("Prompt actor persistence incomplete; failed actor_ids=%s", failures)
                 else:
                     log.info("Prompt actor response persisted: count=%d", len(updates))
+                if "ailin-tick-actor" not in failures and any(
+                    u.actor_id == "ailin-tick-actor" for u in updates
+                ):
+                    self._pulse_ailin()
         elif config.ACTORS_ENABLED and ("<<<AXON_ACTOR_UPDATE>>>" in response_text
                                         or "<<<END_AXON_ACTOR_UPDATE>>>" in response_text):
             try:
