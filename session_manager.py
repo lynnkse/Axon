@@ -77,6 +77,7 @@ class QueueItem:
     source: str       # "telegram" | "proactive"
     user_id: str
     media_path: Optional[str] = None
+    request_id: Optional[str] = None
     # Snapshot supplied to the same LLM turn; used to validate/CAS-save output.
     prompt_actor_rows: Optional[list[dict]] = None
 
@@ -395,6 +396,14 @@ class SessionManagerNode:
             parts.append(f"User timezone: {config.USER_TIMEZONE}")
         if profile:
             parts.append(f"\nProfile:\n{profile}")
+        if config.INSTANCE == "ailin":
+            # Deterministic continuity: loaded once per process start (this
+            # runs inside _spawn_claude), so a crash/restart doesn't wipe her
+            # memory of prior real conversation turns even though nothing
+            # else about her state pipeline is guaranteed to run reliably.
+            recent = supabase_client.fetch_ailin_recent_conversations()
+            if recent:
+                parts.append(f"\n{recent}")
         if not config.SKIP_MEMORY_FETCH:
             # Alive state — prepend creature context if available
             alive = supabase_client.fetch_alive_state()
@@ -977,6 +986,10 @@ class SessionManagerNode:
                 content=item.text,
                 channel=config.SESSION_CHANNEL,
             )
+            if config.INSTANCE == "ailin" and item.source != "reflection":
+                # Only real conversation turns, not internal ticks -- her own
+                # prompt already says internal ticks produce nothing visible.
+                supabase_client.save_ailin_conversation(role="user", content=item.text)
 
             # v4: reflection idle-clock — any real user message resets it
             if item.source != "reflection":
@@ -1024,7 +1037,10 @@ class SessionManagerNode:
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
             reflection_context = ""
             if item.source == "telegram":
-                reflection_context = supabase_client.fetch_relevant_dreams(item.text)
+                if config.INSTANCE == "ailin":
+                    reflection_context = supabase_client.fetch_ailin_semantic_context(item.text)
+                else:
+                    reflection_context = supabase_client.fetch_relevant_dreams(item.text)
             alive_prefix = self._alive_message_prefix()
             prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
 
@@ -1279,16 +1295,23 @@ class SessionManagerNode:
 
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         """Persist/strip generic tags and publish; contains no actor transition work."""
+        if config.INSTANCE == "ailin":
+            supabase_client.apply_ailin_tick(response_text, is_real_turn=(item.source != "reflection"))
+            response_text = supabase_client.strip_ailin_tags(response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
         supabase_client.save_message(
             role="assistant",
             content=clean_text,
             channel=config.SESSION_CHANNEL,
         )
+        if config.INSTANCE == "ailin" and item.source != "reflection":
+            # conversations_role_check only allows 'user'/'ailin'/'system'.
+            supabase_client.save_ailin_conversation(role="ailin", content=clean_text)
         payload = json.dumps({
             "text": clean_text,
             "source": item.source,
             "user_id": item.user_id,
+            "request_id": item.request_id,
         }) + "\n"
         payload_bytes = payload.encode()
 
@@ -1367,6 +1390,7 @@ class SessionManagerNode:
                                 source=msg.get("source", "unknown"),
                                 user_id=msg.get("user_id", ""),
                                 media_path=msg.get("media_path"),
+                                request_id=msg.get("request_id"),
                             ))
                     except (json.JSONDecodeError, KeyError) as e:
                         log.warning(f"Bad input message: {e}")

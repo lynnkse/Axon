@@ -171,7 +171,7 @@ def _prompt_relevance_exists(path: str) -> bool | None:
     return bool(rows) if isinstance(rows, list) else None
 
 
-AILIN_PULSE_COOLDOWN_SECONDS = 45 * 60  # min gap between internal ticks sent to Ailin's own session
+AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
 
 
 def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
@@ -341,6 +341,283 @@ def _mark_done(search_text: str):
             "metadata": {},
         })
         log.info(f"No open task found for '{search_text[:40]}', inserted completed record")
+
+
+# ------------------------------------------------------------------
+# Ailin deterministic tick pipeline (2026-08-22)
+#
+# Her system prompt asks her to run the full DESIGN.md pipeline herself via
+# mcp__supabase tool calls every turn -- confirmed unreliable in practice
+# (she just chats, no tool calls happen). This makes the two most visible
+# pieces (valence, body_state) deterministic instead: she optionally emits
+# lightweight tags in her reply text (same pattern as Axon's own
+# [VALENCE:]/[MOOD:] tags), and the runtime -- not her judgment -- applies
+# the actual particle-drift-toward-target math and persists the result.
+# Only the mean per axis is stored (matches the existing valence/body_state
+# schema), not the full 30-particle population; decay/drift formulas are
+# applied directly to the mean, which is mathematically equivalent in
+# expectation. Q-learning/active_conditions/pattern extraction are NOT
+# covered by this pass -- deliberately scoped down, flagged to Anton.
+
+_AILIN_VALENCE_AXES = [
+    "comfort", "threat", "curiosity", "social", "frustration", "coherence",
+    "boredom", "fatigue", "attachment", "anticipation", "pain", "pleasure",
+    "arousal", "tension", "hunger",
+]
+_AILIN_BODY_AREAS = ["head", "chest", "stomach", "limbs", "genitals", "skin"]
+_AILIN_DECAY_RATE = 0.08
+_AILIN_BODY_DECAY = 0.95
+_AILIN_DRIFT_INTENSITY = 0.6  # how hard a named signal pulls the mean this tick
+
+_AILIN_VALENCE_TAG_RE = re.compile(r'\[AILIN_VALENCE:\s*(.+?)\]', re.DOTALL)
+_AILIN_BODY_TAG_RE = re.compile(r'\[AILIN_BODY:\s*(.+?)\]', re.DOTALL)
+_AILIN_DREAM_TAG_RE = re.compile(r'\[AILIN_DREAM:\s*(.+?)\]', re.DOTALL)
+_AILIN_ALL_TAGS_RE = re.compile(
+    r'\[AILIN_VALENCE:[^\]]+\]|\[AILIN_BODY:[^\]]+\]|\[AILIN_DREAM:[^\]]+\]',
+    re.DOTALL,
+)
+
+
+def _ailin_creds() -> tuple[str, str]:
+    return config.get("AILIN_SUPABASE_URL", ""), config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+
+
+def _ailin_get(path: str):
+    url_base, key = _ailin_creds()
+    if not url_base or not key:
+        return None
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/{path}",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("Ailin tick GET failed for %s: %s", path, exc)
+        return None
+
+
+def _ailin_post(table: str, payload: dict) -> bool:
+    url_base, key = _ailin_creds()
+    if not url_base or not key:
+        return False
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/{table}",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json", "Prefer": "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as exc:
+        log.warning("Ailin tick POST to %s failed: %s", table, exc)
+        return False
+
+
+def _parse_ailin_kv_tag(raw: str) -> dict:
+    """Parse 'axis=+0.3, axis2=-0.2' into {axis: float}, clamped to [-1, 1]."""
+    out = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        key = key.strip().lower()
+        try:
+            out[key] = max(-1.0, min(1.0, float(val.strip())))
+        except ValueError:
+            continue
+    return out
+
+
+def apply_ailin_tick(response_text: str, is_real_turn: bool) -> None:
+    """Deterministic decay + (on real turns) drift-toward-target for
+    valence/body_state, driven by optional tags in her own reply text.
+    Runs on every tick (real conversation or internal), synchronous --
+    read-then-write, not fire-and-forget, to avoid interleaving surprises."""
+    valence_match = _AILIN_VALENCE_TAG_RE.search(response_text)
+    body_match = _AILIN_BODY_TAG_RE.search(response_text)
+    dream_match = _AILIN_DREAM_TAG_RE.search(response_text)
+    valence_targets = _parse_ailin_kv_tag(valence_match.group(1)) if (valence_match and is_real_turn) else {}
+    body_targets = _parse_ailin_kv_tag(body_match.group(1)) if (body_match and is_real_turn) else {}
+
+    latest_valence = _ailin_get("valence?select=*&order=created_at.desc&limit=1")
+    prev_v = latest_valence[0] if latest_valence else {}
+    prev_tick = int(prev_v.get("tick") or 0)
+
+    new_valence = {}
+    for axis in _AILIN_VALENCE_AXES:
+        current = float(prev_v.get(axis) or 0.0)
+        decayed = current + _AILIN_DECAY_RATE * (0.0 - current)
+        if axis in valence_targets:
+            decayed = decayed + _AILIN_DRIFT_INTENSITY * (valence_targets[axis] - decayed) * 0.3
+        new_valence[axis] = round(max(-1.0, min(1.0, decayed)), 4)
+
+    scalar = (
+        new_valence["comfort"] + new_valence["curiosity"] + new_valence["social"]
+        + new_valence["coherence"] + new_valence["attachment"] + new_valence["anticipation"]
+        - new_valence["threat"] - new_valence["frustration"] - new_valence["boredom"]
+        - new_valence["fatigue"] + new_valence["pleasure"] - new_valence["pain"]
+        - new_valence["tension"] - new_valence["hunger"] + 0.3 * new_valence["arousal"]
+    ) / 11.0
+
+    # wall_time has no default and must be supplied; id is a GENERATED
+    # ALWAYS identity column and must NOT be supplied (Supabase rejects an
+    # explicit id with 400 -- confirmed directly against Postgres).
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    valence_payload = dict(new_valence)
+    valence_payload.update({
+        "wall_time": now_iso,
+        "tick": prev_tick + 1,
+        "tick_type": "real" if is_real_turn else "internal",
+        "scalar": round(scalar, 4),
+        "origin": "supabase_native",
+    })
+    _ailin_post("valence", valence_payload)
+
+    latest_body = _ailin_get("body_state?select=*&order=created_at.desc&limit=1")
+    prev_b = latest_body[0] if latest_body else {}
+    new_body = {}
+    for area in _AILIN_BODY_AREAS:
+        current = float(prev_b.get(area) or 0.0)
+        decayed = current * _AILIN_BODY_DECAY
+        if area in body_targets:
+            decayed = decayed + body_targets[area] * 0.4
+        new_body[area] = round(max(-1.0, min(1.0, decayed)), 4)
+    new_body.update({"tick": prev_tick + 1, "origin": "supabase_native"})
+    _ailin_post("body_state", new_body)
+
+    if dream_match:
+        dream_text = dream_match.group(1).strip()
+        if dream_text:
+            _ailin_post("dreams", {
+                "wall_time": now_iso,
+                "thought": dream_text, "tick": prev_tick + 1,
+                "impact": abs(scalar), "origin": "supabase_native",
+            })
+
+
+def strip_ailin_tags(text: str) -> str:
+    return _AILIN_ALL_TAGS_RE.sub("", text).strip()
+
+
+def save_ailin_conversation(role: str, content: str):
+    """Persist one turn to Ailin's own conversations table (separate Supabase
+    project from Axon's). Deterministic -- called by the runtime every real
+    turn, not left to Ailin's own judgment to invoke, so continuity doesn't
+    depend on whether she chose to call a DB tool that turn."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return
+    payload = {
+        "message_ts": datetime.now(timezone.utc).isoformat(),  # NOT NULL, no default
+        "role": role,
+        "content": content,
+        "origin": "supabase_native",
+    }
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/conversations",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",  # need the id back to trigger embedding
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+            row_id = rows[0]["id"] if rows else None
+    except Exception as exc:
+        log.warning("save_ailin_conversation failed: %s", exc)
+        return
+    if row_id is not None:
+        _fire(_trigger_ailin_embed, row_id, content, "conversations")
+
+
+def _trigger_ailin_embed(row_id, content: str, table: str):
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/functions/v1/embed",
+        data=json.dumps({"record": {"id": row_id, "content": content}, "table": table}).encode(),
+        method="POST",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+    except Exception as exc:
+        log.warning("Ailin embed trigger failed (%s row %s): %s", table, row_id, exc)
+
+
+def fetch_ailin_semantic_context(query: str, match_count: int = 5, match_threshold: float = 0.65) -> str:
+    """Semantic recall against Ailin's own conversation history, independent
+    of recency. Returns a formatted context block, or empty string."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return ""
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/functions/v1/search",
+        data=json.dumps({
+            "query": query[:500], "table": "conversations",
+            "match_count": match_count, "match_threshold": match_threshold,
+        }).encode(),
+        method="POST",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            results = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("fetch_ailin_semantic_context failed: %s", exc)
+        return ""
+    if not results:
+        return ""
+    lines = [f"- {r.get('role', '?')}: {r.get('content', '')}" for r in results if r.get("content")]
+    if not lines:
+        return ""
+    return "[Semantically relevant memories, from earlier -- not necessarily recent]\n" + "\n".join(lines)
+
+
+def fetch_ailin_recent_conversations(n: int = 20) -> str:
+    """Fetch Ailin's last N real conversation turns for continuity context.
+    Formatted transcript, oldest first. Empty string if unavailable."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return ""
+    url = (
+        f"{url_base.rstrip('/')}/rest/v1/conversations"
+        f"?select=role,content,created_at&order=created_at.desc&limit={n}"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("fetch_ailin_recent_conversations failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    rows.reverse()
+    lines = [f"{r.get('role', '?')}: {r.get('content', '')}" for r in rows]
+    return "Recent conversation history (your own memory, from prior turns):\n" + "\n".join(lines)
 
 
 def save_message(role: str, content: str, channel: str = "telegram", metadata: Optional[dict] = None):

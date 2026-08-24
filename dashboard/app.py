@@ -927,6 +927,52 @@ with tab_projects:
                             else:
                                 st.caption("No stage detail recorded yet.")
 
+                proj_metadata = project.get("metadata") or {}
+
+                data_source = proj_metadata.get("data_source")
+                if isinstance(data_source, dict) and data_source.get("path"):
+                    st.markdown(
+                        f'<div class="memory-block" style="font-family: monospace; font-size: 0.85em;">'
+                        f'📁 <strong>Data source:</strong> {html.escape(data_source["path"])}'
+                        + (f'<div class="memory-meta">{html.escape(data_source["note"])}</div>' if data_source.get("note") else "")
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                results_table = proj_metadata.get("results_table")
+                if isinstance(results_table, dict) and results_table.get("rows"):
+                    st.markdown(f"##### {results_table.get('title', 'Results')}")
+                    columns = results_table.get("columns") or []
+                    st.dataframe(
+                        [dict(zip(columns, row)) for row in results_table["rows"]],
+                        use_container_width=True, hide_index=True,
+                    )
+                    if results_table.get("note"):
+                        st.caption(results_table["note"])
+
+                dynamics = proj_metadata.get("dynamics_table")
+                if isinstance(dynamics, dict) and dynamics.get("rows"):
+                    with st.expander(f"📊 {dynamics.get('title', 'Dynamics')}", expanded=False):
+                        st.dataframe(
+                            dynamics["rows"], use_container_width=True, hide_index=True,
+                            column_config={col: st.column_config.Column(col) for col in (dynamics.get("columns") or [])},
+                        )
+                        if dynamics.get("note"):
+                            st.caption(dynamics["note"])
+
+                diagrams = proj_metadata.get("diagrams")
+                if isinstance(diagrams, list) and diagrams:
+                    cols_per_row = 2
+                    for row_start in range(0, len(diagrams), cols_per_row):
+                        row_diagrams = diagrams[row_start:row_start + cols_per_row]
+                        cols = st.columns(cols_per_row)
+                        for col, diagram in zip(cols, row_diagrams):
+                            if isinstance(diagram, dict) and diagram.get("url"):
+                                with col:
+                                    st.image(diagram["url"], caption=diagram.get("caption") or "", use_container_width=True)
+                elif proj_metadata.get("diagram_url"):
+                    st.image(proj_metadata["diagram_url"], caption=proj_metadata.get("diagram_caption") or "", use_container_width=True)
+
                 insights = _sb_get(
                     "insights",
                     f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=created_at.desc&limit=50"
