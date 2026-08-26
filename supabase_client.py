@@ -446,6 +446,12 @@ def apply_ailin_tick(response_text: str, is_real_turn: bool) -> None:
     valence_targets = _parse_ailin_kv_tag(valence_match.group(1)) if (valence_match and is_real_turn) else {}
     body_targets = _parse_ailin_kv_tag(body_match.group(1)) if (body_match and is_real_turn) else {}
 
+    if is_real_turn and not valence_match and not body_match and len(response_text) > 400:
+        log.warning(
+            "Ailin real turn (%d chars) emitted no AILIN_VALENCE/AILIN_BODY tag -- "
+            "state mechanism may be silently under-firing", len(response_text)
+        )
+
     latest_valence = _ailin_get("valence?select=*&order=created_at.desc&limit=1")
     prev_v = latest_valence[0] if latest_valence else {}
     prev_tick = int(prev_v.get("tick") or 0)
