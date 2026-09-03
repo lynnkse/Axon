@@ -1300,8 +1300,23 @@ def main():
 
         log.info(f"TelegramNode starting (authorized user: {AUTHORIZED_USER_ID or 'ANY'})")
 
-    app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).build()
-    app.run_polling(drop_pending_updates=True)
+    # run_polling() raises (not retries) on a failed initial connection (e.g.
+    # TimedOut while ROG's network is briefly down), which used to kill the
+    # whole process. Retry with capped backoff instead of crashing, so it
+    # self-recovers once connectivity returns rather than needing a manual
+    # restart every time.
+    backoff = 5
+    while True:
+        try:
+            app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).build()
+            app.run_polling(drop_pending_updates=True)
+            break  # run_polling() only returns on clean shutdown
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            log.exception(f"run_polling() failed to start/stay up — retrying in {backoff}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 120)
 
 
 if __name__ == "__main__":
