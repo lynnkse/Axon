@@ -18,7 +18,7 @@ import logging
 import re
 import threading
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 from typing import Optional
@@ -66,7 +66,7 @@ def strip_response_tags(text: str) -> str:
 
 def _rest_insert(table: str, payload: dict) -> bool:
     """Insert one row into a Supabase table via REST API. Returns True on success."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return False
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
     data = json.dumps(payload).encode()
@@ -75,8 +75,8 @@ def _rest_insert(table: str, payload: dict) -> bool:
         data=data,
         method="POST",
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
@@ -95,11 +95,11 @@ def _rest_insert(table: str, payload: dict) -> bool:
 
 def _rest_patch(table: str, filters: str, payload: dict) -> bool:
     """PATCH (update) rows matching filters. Never deletes anything."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return False
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}?{filters}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="PATCH", headers={
-        "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json", "Prefer": "return=minimal"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -114,10 +114,10 @@ def _rest_patch(table: str, filters: str, payload: dict) -> bool:
 
 
 def _rest_get(path: str, timeout: int = 10):
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return []
     req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
-        "apikey": config.SUPABASE_ANON_KEY, "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}"})
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
@@ -133,13 +133,13 @@ def fetch_actor_states() -> list[dict]:
 
 def fetch_prompt_actor_states() -> list[dict] | None:
     """Strict global actor fetch: distinguish a real empty table from failure."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         log.error("Prompt actor fetch unavailable: Supabase is not configured")
         return None
     path = "actor_state?order=actor_id.asc"
     req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -155,12 +155,12 @@ def fetch_prompt_actor_states() -> list[dict] | None:
 
 def _prompt_relevance_exists(path: str) -> bool | None:
     """Strict, cheap existence probe: None means the gate must fail open."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     req = urllib.request.Request(
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}",
-        headers={"apikey": config.SUPABASE_ANON_KEY,
-                 "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}"},
+        headers={"apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                 "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -171,6 +171,9 @@ def _prompt_relevance_exists(path: str) -> bool | None:
     return bool(rows) if isinstance(rows, list) else None
 
 
+AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
+
+
 def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
     """Actor-type-aware dirty probe; add new actor probes to this dispatcher."""
     actor_id = str(actor_row.get("actor_id", ""))
@@ -179,16 +182,37 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
         actor_id == "fitness-food-coach" or actor_id.endswith(":fitness-food-coach")
         or actor_type in {"fitness", "fitness-food-coach"}
     ) else actor_type
-    if kind != "fitness-food-coach":
+    if kind == "ailin-tick-actor":
+        # Not a data-freshness probe -- this actor is a pacing flag for Ailin's
+        # separate standalone session (see ailin_session_manager pulses). Fires
+        # on a wall-clock cooldown only, independent of any table content.
+        since = actor_row.get("last_advanced_at")
+        if not since:
+            return True
+        try:
+            last = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            last = last.replace(tzinfo=last.tzinfo or timezone.utc).astimezone(timezone.utc)
+        except ValueError:
+            return True
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        return elapsed >= AILIN_PULSE_COOLDOWN_SECONDS
+    if kind not in {"fitness-food-coach", "anton-state-tracker"}:
         return None
     since = actor_row.get("last_advanced_at")
     if not since:
         return True
     encoded_since = urllib.parse.quote(str(since), safe="-:TZ.")
-    probes = (
-        f"food_entries?select=id&created_at=gt.{encoded_since}&limit=1",
-        f"fitness_log?select=date&updated_at=gt.{encoded_since}&limit=1",
-    )
+    if kind == "anton-state-tracker":
+        probes = (
+            f"compulsive_behavior_tracking?select=id&created_at=gt.{encoded_since}&limit=1",
+            f"food_entries?select=id&created_at=gt.{encoded_since}&limit=1",
+            f"fitness_log?select=date&updated_at=gt.{encoded_since}&limit=1",
+        )
+    else:
+        probes = (
+            f"food_entries?select=id&created_at=gt.{encoded_since}&limit=1",
+            f"fitness_log?select=date&updated_at=gt.{encoded_since}&limit=1",
+        )
     for path in probes:
         changed = _prompt_relevance_exists(path)
         if changed is not False:
@@ -233,7 +257,7 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
         "last_advanced_at": now,
         "updated_at": now,
     }
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         log.error("Actor update persistence unavailable for %s: Supabase is not configured", actor_id)
         return False
     filters = (f"actor_id=eq.{urllib.parse.quote(str(actor_id))}"
@@ -241,8 +265,8 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
     req = urllib.request.Request(
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/actor_state?{filters}",
         data=json.dumps(payload).encode(), method="PATCH", headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         })
@@ -278,7 +302,7 @@ def _mark_done(search_text: str):
     Never deletes — only updates. If no match, inserts a completed record.
     """
     import urllib.parse, datetime
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return
 
     now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -292,8 +316,8 @@ def _mark_done(search_text: str):
     req = urllib.request.Request(
         find_url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -319,6 +343,289 @@ def _mark_done(search_text: str):
         log.info(f"No open task found for '{search_text[:40]}', inserted completed record")
 
 
+# ------------------------------------------------------------------
+# Ailin deterministic tick pipeline (2026-08-22)
+#
+# Her system prompt asks her to run the full DESIGN.md pipeline herself via
+# mcp__supabase tool calls every turn -- confirmed unreliable in practice
+# (she just chats, no tool calls happen). This makes the two most visible
+# pieces (valence, body_state) deterministic instead: she optionally emits
+# lightweight tags in her reply text (same pattern as Axon's own
+# [VALENCE:]/[MOOD:] tags), and the runtime -- not her judgment -- applies
+# the actual particle-drift-toward-target math and persists the result.
+# Only the mean per axis is stored (matches the existing valence/body_state
+# schema), not the full 30-particle population; decay/drift formulas are
+# applied directly to the mean, which is mathematically equivalent in
+# expectation. Q-learning/active_conditions/pattern extraction are NOT
+# covered by this pass -- deliberately scoped down, flagged to Anton.
+
+_AILIN_VALENCE_AXES = [
+    "comfort", "threat", "curiosity", "social", "frustration", "coherence",
+    "boredom", "fatigue", "attachment", "anticipation", "pain", "pleasure",
+    "arousal", "tension", "hunger",
+]
+_AILIN_BODY_AREAS = ["head", "chest", "stomach", "limbs", "genitals", "skin"]
+_AILIN_DECAY_RATE = 0.08
+_AILIN_BODY_DECAY = 0.95
+_AILIN_DRIFT_INTENSITY = 0.6  # how hard a named signal pulls the mean this tick
+
+_AILIN_VALENCE_TAG_RE = re.compile(r'\[AILIN_VALENCE:\s*(.+?)\]', re.DOTALL)
+_AILIN_BODY_TAG_RE = re.compile(r'\[AILIN_BODY:\s*(.+?)\]', re.DOTALL)
+_AILIN_DREAM_TAG_RE = re.compile(r'\[AILIN_DREAM:\s*(.+?)\]', re.DOTALL)
+_AILIN_ALL_TAGS_RE = re.compile(
+    r'\[AILIN_VALENCE:[^\]]+\]|\[AILIN_BODY:[^\]]+\]|\[AILIN_DREAM:[^\]]+\]',
+    re.DOTALL,
+)
+
+
+def _ailin_creds() -> tuple[str, str]:
+    return config.get("AILIN_SUPABASE_URL", ""), config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+
+
+def _ailin_get(path: str):
+    url_base, key = _ailin_creds()
+    if not url_base or not key:
+        return None
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/{path}",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("Ailin tick GET failed for %s: %s", path, exc)
+        return None
+
+
+def _ailin_post(table: str, payload: dict) -> bool:
+    url_base, key = _ailin_creds()
+    if not url_base or not key:
+        return False
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/{table}",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json", "Prefer": "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as exc:
+        log.warning("Ailin tick POST to %s failed: %s", table, exc)
+        return False
+
+
+def _parse_ailin_kv_tag(raw: str) -> dict:
+    """Parse 'axis=+0.3, axis2=-0.2' into {axis: float}, clamped to [-1, 1]."""
+    out = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        key = key.strip().lower()
+        try:
+            out[key] = max(-1.0, min(1.0, float(val.strip())))
+        except ValueError:
+            continue
+    return out
+
+
+def apply_ailin_tick(response_text: str, is_real_turn: bool) -> None:
+    """Deterministic decay + (on real turns) drift-toward-target for
+    valence/body_state, driven by optional tags in her own reply text.
+    Runs on every tick (real conversation or internal), synchronous --
+    read-then-write, not fire-and-forget, to avoid interleaving surprises."""
+    valence_match = _AILIN_VALENCE_TAG_RE.search(response_text)
+    body_match = _AILIN_BODY_TAG_RE.search(response_text)
+    dream_match = _AILIN_DREAM_TAG_RE.search(response_text)
+    valence_targets = _parse_ailin_kv_tag(valence_match.group(1)) if (valence_match and is_real_turn) else {}
+    body_targets = _parse_ailin_kv_tag(body_match.group(1)) if (body_match and is_real_turn) else {}
+
+    if is_real_turn and not valence_match and not body_match and len(response_text) > 400:
+        log.warning(
+            "Ailin real turn (%d chars) emitted no AILIN_VALENCE/AILIN_BODY tag -- "
+            "state mechanism may be silently under-firing", len(response_text)
+        )
+
+    latest_valence = _ailin_get("valence?select=*&order=created_at.desc&limit=1")
+    prev_v = latest_valence[0] if latest_valence else {}
+    prev_tick = int(prev_v.get("tick") or 0)
+
+    new_valence = {}
+    for axis in _AILIN_VALENCE_AXES:
+        current = float(prev_v.get(axis) or 0.0)
+        decayed = current + _AILIN_DECAY_RATE * (0.0 - current)
+        if axis in valence_targets:
+            decayed = decayed + _AILIN_DRIFT_INTENSITY * (valence_targets[axis] - decayed) * 0.3
+        new_valence[axis] = round(max(-1.0, min(1.0, decayed)), 4)
+
+    scalar = (
+        new_valence["comfort"] + new_valence["curiosity"] + new_valence["social"]
+        + new_valence["coherence"] + new_valence["attachment"] + new_valence["anticipation"]
+        - new_valence["threat"] - new_valence["frustration"] - new_valence["boredom"]
+        - new_valence["fatigue"] + new_valence["pleasure"] - new_valence["pain"]
+        - new_valence["tension"] - new_valence["hunger"] + 0.3 * new_valence["arousal"]
+    ) / 11.0
+
+    # wall_time has no default and must be supplied; id is a GENERATED
+    # ALWAYS identity column and must NOT be supplied (Supabase rejects an
+    # explicit id with 400 -- confirmed directly against Postgres).
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    valence_payload = dict(new_valence)
+    valence_payload.update({
+        "wall_time": now_iso,
+        "tick": prev_tick + 1,
+        "tick_type": "real" if is_real_turn else "internal",
+        "scalar": round(scalar, 4),
+        "origin": "supabase_native",
+    })
+    _ailin_post("valence", valence_payload)
+
+    latest_body = _ailin_get("body_state?select=*&order=created_at.desc&limit=1")
+    prev_b = latest_body[0] if latest_body else {}
+    new_body = {}
+    for area in _AILIN_BODY_AREAS:
+        current = float(prev_b.get(area) or 0.0)
+        decayed = current * _AILIN_BODY_DECAY
+        if area in body_targets:
+            decayed = decayed + body_targets[area] * 0.4
+        new_body[area] = round(max(-1.0, min(1.0, decayed)), 4)
+    new_body.update({"tick": prev_tick + 1, "origin": "supabase_native"})
+    _ailin_post("body_state", new_body)
+
+    if dream_match:
+        dream_text = dream_match.group(1).strip()
+        if dream_text:
+            _ailin_post("dreams", {
+                "wall_time": now_iso,
+                "thought": dream_text, "tick": prev_tick + 1,
+                "impact": abs(scalar), "origin": "supabase_native",
+            })
+
+
+def strip_ailin_tags(text: str) -> str:
+    return _AILIN_ALL_TAGS_RE.sub("", text).strip()
+
+
+def save_ailin_conversation(role: str, content: str):
+    """Persist one turn to Ailin's own conversations table (separate Supabase
+    project from Axon's). Deterministic -- called by the runtime every real
+    turn, not left to Ailin's own judgment to invoke, so continuity doesn't
+    depend on whether she chose to call a DB tool that turn."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return
+    payload = {
+        "message_ts": datetime.now(timezone.utc).isoformat(),  # NOT NULL, no default
+        "role": role,
+        "content": content,
+        "origin": "supabase_native",
+    }
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/rest/v1/conversations",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",  # need the id back to trigger embedding
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+            row_id = rows[0]["id"] if rows else None
+    except Exception as exc:
+        log.warning("save_ailin_conversation failed: %s", exc)
+        return
+    if row_id is not None:
+        _fire(_trigger_ailin_embed, row_id, content, "conversations")
+
+
+def _trigger_ailin_embed(row_id, content: str, table: str):
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/functions/v1/embed",
+        data=json.dumps({"record": {"id": row_id, "content": content}, "table": table}).encode(),
+        method="POST",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+    except Exception as exc:
+        log.warning("Ailin embed trigger failed (%s row %s): %s", table, row_id, exc)
+
+
+def fetch_ailin_semantic_context(query: str, match_count: int = 5, match_threshold: float = 0.65) -> str:
+    """Semantic recall against Ailin's own conversation history, independent
+    of recency. Returns a formatted context block, or empty string."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return ""
+    req = urllib.request.Request(
+        f"{url_base.rstrip('/')}/functions/v1/search",
+        data=json.dumps({
+            "query": query[:500], "table": "conversations",
+            "match_count": match_count, "match_threshold": match_threshold,
+        }).encode(),
+        method="POST",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            results = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("fetch_ailin_semantic_context failed: %s", exc)
+        return ""
+    if not results:
+        return ""
+    lines = [f"- {r.get('role', '?')}: {r.get('content', '')}" for r in results if r.get("content")]
+    if not lines:
+        return ""
+    return "[Semantically relevant memories, from earlier -- not necessarily recent]\n" + "\n".join(lines)
+
+
+def fetch_ailin_recent_conversations(n: int = 20) -> str:
+    """Fetch Ailin's last N real conversation turns for continuity context.
+    Formatted transcript, oldest first. Empty string if unavailable."""
+    url_base = config.get("AILIN_SUPABASE_URL", "")
+    key = config.get("AILIN_SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url_base or not key:
+        return ""
+    url = (
+        f"{url_base.rstrip('/')}/rest/v1/conversations"
+        f"?select=role,content,created_at&order=created_at.desc&limit={n}"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.warning("fetch_ailin_recent_conversations failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    rows.reverse()
+    lines = [f"{r.get('role', '?')}: {r.get('content', '')}" for r in rows]
+    return "Recent conversation history (your own memory, from prior turns):\n" + "\n".join(lines)
+
+
 def save_message(role: str, content: str, channel: str = "telegram", metadata: Optional[dict] = None):
     """Save a message to the messages table (non-blocking)."""
     payload = {
@@ -332,13 +639,13 @@ def save_message(role: str, content: str, channel: str = "telegram", metadata: O
 
 def _get_or_create_project_id(project_name: str) -> Optional[str]:
     """Look up project by name, create if not exists. Returns UUID string."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     # Try to fetch existing
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/projects?name=eq.{urllib.parse.quote(project_name)}&select=id&limit=1"
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -408,7 +715,7 @@ def fetch_memory_context(limit: int = 50) -> str:
     Returns a formatted string ready to inject into the system prompt.
     Returns empty string if Supabase is not configured or unreachable.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
 
     results = []
@@ -421,8 +728,8 @@ def fetch_memory_context(limit: int = 50) -> str:
         req = urllib.request.Request(
             url,
             headers={
-                "apikey": config.SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
             },
         )
         try:
@@ -451,7 +758,7 @@ def fetch_recent_messages(n: int = 20, channel: Optional[str] = None) -> str:
     Returns a formatted transcript string, oldest first.
     Returns empty string if unavailable.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
 
     filter_part = f"&channel=eq.{channel}" if channel else ""
@@ -463,8 +770,8 @@ def fetch_recent_messages(n: int = 20, channel: Optional[str] = None) -> str:
     req = urllib.request.Request(
         url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -497,7 +804,7 @@ def fetch_recent_summaries(n: int = 5, channel: str = "telegram") -> list:
     Fetch the last N conversation summaries for the given channel, oldest first.
     Returns list of summary strings.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return []
     url = (
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/summaries"
@@ -507,8 +814,8 @@ def fetch_recent_summaries(n: int = 5, channel: str = "telegram") -> list:
     req = urllib.request.Request(
         url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -523,7 +830,7 @@ def fetch_recent_summaries(n: int = 5, channel: str = "telegram") -> list:
 
 def save_summary(channel: str, content: str, message_count: int) -> None:
     """Insert a new summary into the summaries table."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/summaries"
     payload = json.dumps({"channel": channel, "content": content, "message_count": message_count}).encode()
@@ -532,8 +839,8 @@ def save_summary(channel: str, content: str, message_count: int) -> None:
         data=payload,
         method="POST",
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
@@ -547,7 +854,7 @@ def save_summary(channel: str, content: str, message_count: int) -> None:
 
 def get_last_summary_time(channel: str = "telegram") -> Optional[str]:
     """Return the created_at timestamp of the most recent summary, or None."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     url = (
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/summaries"
@@ -556,8 +863,8 @@ def get_last_summary_time(channel: str = "telegram") -> Optional[str]:
     req = urllib.request.Request(
         url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -575,7 +882,7 @@ def fetch_messages_since(since_ts: Optional[str], channel: str = "telegram", lim
     If since_ts is None, fetches the oldest `limit` messages in channel.
     Returns list of {"role": str, "content": str} dicts.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return []
     filter_ts = f"&created_at=gt.{since_ts}" if since_ts else ""
     url = (
@@ -586,8 +893,8 @@ def fetch_messages_since(since_ts: Optional[str], channel: str = "telegram", lim
     req = urllib.request.Request(
         url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -610,7 +917,7 @@ def fetch_recent_messages_as_turns(n: int = 30, channel: Optional[str] = None) -
     survives process restarts. No content truncation.
     Returns [] if unavailable.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return []
 
     filter_part = f"&channel=eq.{channel}" if channel else ""
@@ -622,8 +929,8 @@ def fetch_recent_messages_as_turns(n: int = 30, channel: Optional[str] = None) -
     req = urllib.request.Request(
         url,
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         },
     )
     try:
@@ -651,7 +958,7 @@ def _search_edge(query: str, table: str, match_count: int = 5, match_threshold: 
     Call the Supabase search edge function.
     Embeds the query server-side (OpenAI key lives in Supabase) and returns matches.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     url = f"{config.SUPABASE_URL.rstrip('/')}/functions/v1/search"
     data = json.dumps({
@@ -665,8 +972,8 @@ def _search_edge(query: str, table: str, match_count: int = 5, match_threshold: 
         data=data,
         method="POST",
         headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
             "Content-Type": "application/json",
         },
     )
@@ -680,12 +987,12 @@ def _search_edge(query: str, table: str, match_count: int = 5, match_threshold: 
 
 def fetch_permanent_rules() -> str:
     """Fetch all active rules marked permanent=true. Always loaded into system prompt."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&permanent=eq.true&name=is.null&select=content"
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -703,15 +1010,15 @@ def fetch_skills_index() -> str:
     Fetch name + short_description for all active permanent skills.
     Returns a compact index for the system prompt — full content is loaded on demand via fetch_skill_by_name().
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
     url = (
         f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules"
         f"?active=eq.true&permanent=eq.true&name=not.is.null&select=name,short_description"
     )
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -730,7 +1037,7 @@ def fetch_skills_index() -> str:
 
 def fetch_skill_by_name(name: str) -> str:
     """Fetch full content of a skill by name. Returns the full protocol/algorithm text."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return f"[skill '{name}' unavailable — database not configured]"
     import urllib.parse as _up
     url = (
@@ -738,8 +1045,8 @@ def fetch_skill_by_name(name: str) -> str:
         f"?active=eq.true&name=eq.{_up.quote(name)}&select=name,content&limit=1"
     )
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -754,12 +1061,12 @@ def fetch_skill_by_name(name: str) -> str:
 
 def _fetch_all_rules() -> list:
     """Fetch all active rules (content + keywords) from Supabase."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return []
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&select=content,keywords"
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -794,12 +1101,12 @@ def fetch_relevant_rule_names(message_text: str) -> str:
     Returns only rule names + short descriptions (anchors), not full content.
     Claude fetches full protocol via the rules table when it needs to act.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rules?active=eq.true&select=name,short_description,keywords,content"
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -848,8 +1155,8 @@ def save_rule(content: str):
             f"?content=eq.{urllib.parse.quote(content.strip())}&order=created_at.desc&limit=1&select=id"
         )
         req = urllib.request.Request(url, headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -867,8 +1174,8 @@ def save_rule(content: str):
             data=json.dumps({"record": {"id": row_id, "content": content.strip()}, "table": "rules"}).encode(),
             method="POST",
             headers={
-                "apikey": config.SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
                 "Content-Type": "application/json",
             },
         )
@@ -908,8 +1215,8 @@ def bump_rule_usage(names: list[str]):
             req = urllib.request.Request(
                 rpc_url, data=data, method="POST",
                 headers={
-                    "apikey": config.SUPABASE_ANON_KEY,
-                    "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                    "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
                     "Content-Type": "application/json",
                 },
             )
@@ -923,13 +1230,13 @@ def bump_rule_usage(names: list[str]):
 
 def fetch_alive_state() -> dict | None:
     """Fetch the single alive_state row. Returns dict or None if unavailable."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/alive_state"
            f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -953,7 +1260,7 @@ def save_alive_state(
     tension: float = 0.0,
 ) -> None:
     """Upsert the alive_state row. Non-blocking."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return
     payload: dict = {
         "instance": config.INSTANCE,
@@ -979,8 +1286,8 @@ def save_alive_state(
             data=json.dumps(payload).encode(),
             method="POST",
             headers={
-                "apikey": config.SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates",
             },
@@ -997,13 +1304,13 @@ def save_alive_state(
 def fetch_anton_model() -> dict | None:
     """Fetch the single anton_model row (persistent filtered estimate of Anton's
     state — affective loop v3, 2026-08-08). Returns dict or None."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return None
     url = (f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/anton_model"
            f"?instance=eq.{config.INSTANCE}&limit=1")
     req = urllib.request.Request(url, headers={
-        "apikey": config.SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+        "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
     })
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -1016,7 +1323,7 @@ def fetch_anton_model() -> dict | None:
 
 def save_anton_model(fields: dict) -> None:
     """Upsert this instance's anton_model row. Non-blocking."""
-    if not config.SUPABASE_URL or not config.SUPABASE_ANON_KEY:
+    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return
     payload = {"instance": config.INSTANCE,
                "updated_at": datetime.utcnow().isoformat() + "Z", **fields}
@@ -1028,8 +1335,8 @@ def save_anton_model(fields: dict) -> None:
             data=json.dumps(payload).encode(),
             method="POST",
             headers={
-                "apikey": config.SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates",
             },
@@ -1095,8 +1402,8 @@ def save_dream(content: str, sources: list):
             f"?order=created_at.desc&limit=1&select=id"
         )
         req = urllib.request.Request(url, headers={
-            "apikey": config.SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1113,8 +1420,8 @@ def save_dream(content: str, sources: list):
             data=json.dumps({"record": {"id": row_id, "content": content.strip()}, "table": "dreams"}).encode(),
             method="POST",
             headers={
-                "apikey": config.SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {config.SUPABASE_ANON_KEY}",
+                "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
                 "Content-Type": "application/json",
             },
         )

@@ -47,6 +47,9 @@ USER_ID: str = get("TELEGRAM_USER_ID", "lynn")
 
 SUPABASE_URL: str = get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY: str = get("SUPABASE_ANON_KEY", "")
+# service_role key — bypasses RLS, backend-only. Falls back to the anon key
+# if unset so existing deployments don't break before .env is updated.
+SUPABASE_SERVICE_ROLE_KEY: str = get("SUPABASE_SERVICE_ROLE_KEY", "") or SUPABASE_ANON_KEY
 
 # Socket paths (SOCKET_DIR overridable for multiple session instances)
 SOCKET_DIR: str = get("SOCKET_DIR", "/tmp/axon")

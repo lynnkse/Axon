@@ -77,6 +77,7 @@ class QueueItem:
     source: str       # "telegram" | "proactive"
     user_id: str
     media_path: Optional[str] = None
+    request_id: Optional[str] = None
     # Snapshot supplied to the same LLM turn; used to validate/CAS-save output.
     prompt_actor_rows: Optional[list[dict]] = None
 
@@ -100,8 +101,8 @@ class SessionManagerNode:
         self.claude_proc: Optional[subprocess.Popen] = None
         self.pty_lock = threading.Lock()
 
-        # CLINode display connection (one at a time)
-        self.display_client: Optional[socket.socket] = None
+        # Display connections — CLINode + any number of web CLI viewers
+        self.display_clients: list[socket.socket] = []
         self.display_lock = threading.Lock()
 
         # Subscribers to claude_response.sock (RouterNode, etc.)
@@ -395,6 +396,14 @@ class SessionManagerNode:
             parts.append(f"User timezone: {config.USER_TIMEZONE}")
         if profile:
             parts.append(f"\nProfile:\n{profile}")
+        if config.INSTANCE == "ailin":
+            # Deterministic continuity: loaded once per process start (this
+            # runs inside _spawn_claude), so a crash/restart doesn't wipe her
+            # memory of prior real conversation turns even though nothing
+            # else about her state pipeline is guaranteed to run reliably.
+            recent = supabase_client.fetch_ailin_recent_conversations()
+            if recent:
+                parts.append(f"\n{recent}")
         if not config.SKIP_MEMORY_FETCH:
             # Alive state — prepend creature context if available
             alive = supabase_client.fetch_alive_state()
@@ -630,11 +639,14 @@ class SessionManagerNode:
 
     def _forward_display(self, data: bytes):
         with self.display_lock:
-            if self.display_client:
+            dead = []
+            for conn in self.display_clients:
                 try:
-                    self.display_client.sendall(data)
+                    conn.sendall(data)
                 except Exception:
-                    self.display_client = None
+                    dead.append(conn)
+            for conn in dead:
+                self.display_clients.remove(conn)
 
         # Feed into PTY output buffer for TUI prompt detection
         for b in data:
@@ -977,6 +989,10 @@ class SessionManagerNode:
                 content=item.text,
                 channel=config.SESSION_CHANNEL,
             )
+            if config.INSTANCE == "ailin" and item.source != "reflection":
+                # Only real conversation turns, not internal ticks -- her own
+                # prompt already says internal ticks produce nothing visible.
+                supabase_client.save_ailin_conversation(role="user", content=item.text)
 
             # v4: reflection idle-clock — any real user message resets it
             if item.source != "reflection":
@@ -1024,7 +1040,10 @@ class SessionManagerNode:
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
             reflection_context = ""
             if item.source == "telegram":
-                reflection_context = supabase_client.fetch_relevant_dreams(item.text)
+                if config.INSTANCE == "ailin":
+                    reflection_context = supabase_client.fetch_ailin_semantic_context(item.text)
+                else:
+                    reflection_context = supabase_client.fetch_relevant_dreams(item.text)
             alive_prefix = self._alive_message_prefix()
             prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
 
@@ -1119,6 +1138,34 @@ class SessionManagerNode:
     # Response publishing
     # ------------------------------------------------------------------
 
+    # Ailin (2026-08-21) is a fully standalone deployment -- own bot, own
+    # session, own Supabase project. This is a fire-and-forget pulse only:
+    # Axon's own liveliness is her heartbeat since she has no scheduler of
+    # her own, but the pulse must never block or fail Axon's own turn.
+    AILIN_USER_INPUT_SOCK = config.get("AILIN_USER_INPUT_SOCK", "/tmp/ailin/user_input.sock")
+    AILIN_PULSE_TEXT = (
+        "[INTERNAL_TICK -- no one is present, this is background time passing, "
+        "not a message from Anton. Let valence/body_state decay toward baseline "
+        "as usual for idle time. You may write a dream if something genuinely "
+        "surfaces; most ticks won't need one. No reply needs to be shown to anyone."
+    )
+
+    def _pulse_ailin(self):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(self.AILIN_USER_INPUT_SOCK)
+            payload = json.dumps({
+                "text": self.AILIN_PULSE_TEXT,
+                "source": "reflection",
+                "user_id": "internal",
+            })
+            sock.sendall((payload + "\n").encode())
+            sock.close()
+            log.info("Pulsed Ailin's session (internal tick)")
+        except Exception as exc:
+            log.warning("Ailin pulse skipped (her session may be down): %s", exc)
+
     def _publish_response(self, item: QueueItem, response_text: str):
         actor_rows = item.prompt_actor_rows or []
         expected_actor_ids = {str(row.get("actor_id")) for row in actor_rows}
@@ -1137,6 +1184,10 @@ class SessionManagerNode:
                     log.error("Prompt actor persistence incomplete; failed actor_ids=%s", failures)
                 else:
                     log.info("Prompt actor response persisted: count=%d", len(updates))
+                if "ailin-tick-actor" not in failures and any(
+                    u.actor_id == "ailin-tick-actor" for u in updates
+                ):
+                    self._pulse_ailin()
         elif config.ACTORS_ENABLED and ("<<<AXON_ACTOR_UPDATE>>>" in response_text
                                         or "<<<END_AXON_ACTOR_UPDATE>>>" in response_text):
             try:
@@ -1247,16 +1298,23 @@ class SessionManagerNode:
 
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         """Persist/strip generic tags and publish; contains no actor transition work."""
+        if config.INSTANCE == "ailin":
+            supabase_client.apply_ailin_tick(response_text, is_real_turn=(item.source != "reflection"))
+            response_text = supabase_client.strip_ailin_tags(response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
         supabase_client.save_message(
             role="assistant",
             content=clean_text,
             channel=config.SESSION_CHANNEL,
         )
+        if config.INSTANCE == "ailin" and item.source != "reflection":
+            # conversations_role_check only allows 'user'/'ailin'/'system'.
+            supabase_client.save_ailin_conversation(role="ailin", content=clean_text)
         payload = json.dumps({
             "text": clean_text,
             "source": item.source,
             "user_id": item.user_id,
+            "request_id": item.request_id,
         }) + "\n"
         payload_bytes = payload.encode()
 
@@ -1335,6 +1393,7 @@ class SessionManagerNode:
                                 source=msg.get("source", "unknown"),
                                 user_id=msg.get("user_id", ""),
                                 media_path=msg.get("media_path"),
+                                request_id=msg.get("request_id"),
                             ))
                     except (json.JSONDecodeError, KeyError) as e:
                         log.warning(f"Bad input message: {e}")
@@ -1412,20 +1471,15 @@ class SessionManagerNode:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
-        server.listen(1)
+        server.listen(5)
         log.info("display.sock listening")
 
         while self._running:
             try:
                 conn, _ = server.accept()
-                log.info("CLINode display connected")
+                log.info("Display client connected (%d total)", len(self.display_clients) + 1)
                 with self.display_lock:
-                    if self.display_client:
-                        try:
-                            self.display_client.close()
-                        except Exception:
-                            pass
-                    self.display_client = conn
+                    self.display_clients.append(conn)
             except Exception:
                 break
 

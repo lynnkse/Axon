@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -162,9 +163,14 @@ async def _transcribe_groq(audio_bytes: bytes) -> str:
 
 # ── SessionManager socket helpers ─────────────────────────────────────────────
 
-def _send_to_session_manager(text: str, source: str, user_id: str, media_path: Optional[str] = None):
-    """Send one NDJSON message to user_input.sock (fire-and-forget)."""
-    msg: dict = {"text": text, "source": source, "user_id": user_id}
+def _send_to_session_manager(text: str, source: str, user_id: str, media_path: Optional[str] = None) -> str:
+    """Send one NDJSON message to user_input.sock (fire-and-forget). Returns
+    a fresh request_id so the caller can wait for exactly this response --
+    the response queue previously matched on source alone, which let any
+    stray same-source message (e.g. a directly-injected test message) get
+    delivered as the reply to an unrelated real request. Confirmed live."""
+    request_id = uuid.uuid4().hex
+    msg: dict = {"text": text, "source": source, "user_id": user_id, "request_id": request_id}
     if media_path:
         msg["media_path"] = media_path
     payload = (json.dumps(msg) + "\n").encode()
@@ -175,6 +181,7 @@ def _send_to_session_manager(text: str, source: str, user_id: str, media_path: O
         sock.close()
     except Exception as e:
         log.error(f"Failed to send to session manager: {e}")
+    return request_id
 
 
 # ── Response subscriber ───────────────────────────────────────────────────────
@@ -382,17 +389,23 @@ async def _wait_for_response(
     subscriber: ResponseSubscriber,
     source: str,
     activity_tracker: Optional[ActivityTracker] = None,
+    request_id: Optional[str] = None,
 ) -> str:
-    """Wait for next response from SessionManager with matching source.
+    """Wait for next response from SessionManager matching this specific request.
 
     The response queue is a catch-all for anything not routed to a dedicated
     queue (confirm/permission/tui/proactive/ralph) -- notably any message with
     a source outside those tags (e.g. "unknown" from a client that didn't set
-    one) lands here too. Previously this function returned whatever came off
-    the queue next with no source check at all, despite the docstring's claim
-    -- a stray message from any such origin would get delivered as the reply
-    to an unrelated pending Telegram request. Now it discards non-matching
-    messages instead of returning them.
+    one) lands here too.
+
+    Source-only matching is NOT enough: confirmed live (2026-08-23) that a
+    same-source message injected outside the normal send/wait cycle (e.g. a
+    directly-injected test message bypassing this function's own send call)
+    sits in the queue and gets handed out as the reply to a later, unrelated
+    request -- silent cross-talk, no error anywhere. When request_id is
+    supplied, only a response echoing that exact id is accepted; anything
+    else (including source-matching-but-wrong-id messages) is discarded.
+    request_id defaults to None only for callers that don't have one yet.
     """
     deadline = asyncio.get_event_loop().time() + _RESPONSE_TIMEOUT
     while True:
@@ -412,6 +425,13 @@ async def _wait_for_response(
             log.warning(
                 f"_wait_for_response: discarding mismatched message "
                 f"(expected source={source!r}, got {msg_source!r}): {msg.get('text', '')[:80]!r}"
+            )
+            continue
+        if request_id is not None and msg.get("request_id") != request_id:
+            log.warning(
+                f"_wait_for_response: discarding stale/foreign response "
+                f"(expected request_id={request_id!r}, got {msg.get('request_id')!r}): "
+                f"{msg.get('text', '')[:80]!r}"
             )
             continue
         return msg.get("text", "")
@@ -497,10 +517,10 @@ async def _handle_and_reply(
             _status_notifier(update, stop_typing, activity_tracker)
         )
 
-        _send_to_session_manager(text, source, user_id, media_path)
+        request_id = _send_to_session_manager(text, source, user_id, media_path)
 
         try:
-            raw = await _wait_for_response(subscriber, source, activity_tracker)
+            raw = await _wait_for_response(subscriber, source, activity_tracker, request_id=request_id)
         finally:
             stop_typing.set()
             for t in (typing_task, status_task):
@@ -856,6 +876,27 @@ def _make_handlers(subscriber: ResponseSubscriber):
 
         await _handle_and_reply(update, context, subscriber, text)
 
+    async def _retry_async(coro_fn, attempts: int = 3, base_delay: float = 1.5, label: str = "call"):
+        """Retry an async call under transient network jitter (observed: TimedOut
+        on get_file/download_to_drive during latency spikes). Linear backoff."""
+        last_err = None
+        for attempt in range(attempts):
+            try:
+                return await coro_fn()
+            except Exception as e:
+                last_err = e
+                log.warning(f"{label} attempt {attempt + 1}/{attempts} failed: {e}")
+                if attempt < attempts - 1:
+                    await asyncio.sleep(base_delay * (attempt + 1))
+        raise last_err
+
+    async def _safe_chat_action(update: Update):
+        """Typing indicator is decorative -- never let it abort the handler."""
+        try:
+            await update.message.reply_chat_action("typing")
+        except Exception as e:
+            log.warning(f"chat_action failed (non-fatal): {e}")
+
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_authorized(update):
             await update.message.reply_text("This bot is private.")
@@ -869,25 +910,16 @@ def _make_handlers(subscriber: ResponseSubscriber):
             )
             return
 
-        await update.message.reply_chat_action("typing")
+        await _safe_chat_action(update)
         try:
-            tg_file = None
-            last_err = None
-            for attempt in range(3):
-                try:
-                    tg_file = await voice.get_file()
-                    break
-                except Exception as e:
-                    last_err = e
-                    log.warning(f"voice.get_file() attempt {attempt + 1}/3 failed: {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(1.5 * (attempt + 1))
-            if tg_file is None:
-                raise last_err
+            tg_file = await _retry_async(voice.get_file, label="voice.get_file()")
             import httpx
-            async with httpx.AsyncClient(timeout=30) as dl_client:
-                resp = await dl_client.get(tg_file.file_path)
-                audio_bytes = resp.content
+
+            async def _dl():
+                async with httpx.AsyncClient(timeout=30) as dl_client:
+                    return await dl_client.get(tg_file.file_path)
+            resp = await _retry_async(_dl, label="voice download")
+            audio_bytes = resp.content
             log.info(f"Voice download: {len(audio_bytes)} bytes, status={resp.status_code}")
             transcription = await _transcribe_voice(bytes(audio_bytes))
             if not transcription:
@@ -898,20 +930,23 @@ def _make_handlers(subscriber: ResponseSubscriber):
             await _handle_and_reply(update, context, subscriber, text)
         except Exception as e:
             log.error(f"Voice error: {e}")
-            await update.message.reply_text("Could not process voice message.")
+            try:
+                await update.message.reply_text("Could not process voice message.")
+            except Exception as reply_err:
+                log.error(f"Voice error-reply also failed (non-fatal): {reply_err}")
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_authorized(update):
             await update.message.reply_text("This bot is private.")
             return
         log.info(f"Photo from {update.effective_user.id}")
-        await update.message.reply_chat_action("typing")
+        await _safe_chat_action(update)
         try:
             photo = update.message.photo[-1]  # highest resolution
-            tg_file = await photo.get_file()
+            tg_file = await _retry_async(photo.get_file, label="photo.get_file()")
             ts = int(time.time() * 1000)
             file_path = str(UPLOADS_DIR / f"image_{ts}.jpg")
-            await tg_file.download_to_drive(file_path)
+            await _retry_async(lambda: tg_file.download_to_drive(file_path), label="photo download")
             caption = update.message.caption or ""
 
             if _is_kb_request(caption):
@@ -930,13 +965,13 @@ def _make_handlers(subscriber: ResponseSubscriber):
             return
         doc = update.message.document
         log.info(f"Document ({doc.file_name}) from {update.effective_user.id}")
-        await update.message.reply_chat_action("typing")
+        await _safe_chat_action(update)
         try:
-            tg_file = await doc.get_file()
+            tg_file = await _retry_async(doc.get_file, label="doc.get_file()")
             ts = int(time.time() * 1000)
             file_name = doc.file_name or f"file_{ts}"
             file_path = str(UPLOADS_DIR / f"{ts}_{file_name}")
-            await tg_file.download_to_drive(file_path)
+            await _retry_async(lambda: tg_file.download_to_drive(file_path), label="document download")
 
             # Detect PDF by magic bytes (handles files without .pdf extension)
             is_pdf = False
@@ -1282,6 +1317,14 @@ def main():
                 pass
 
         application.add_handler(CallbackQueryHandler(on_tui_callback, pattern="^tui:"))
+
+        # Without this, an exception that escapes a handler (e.g. a Telegram
+        # send timing out inside an except-block error reply) propagates
+        # unhandled and takes down the whole process -- confirmed as the
+        # actual cause of the 2026-08-23 silent crashes.
+        async def on_error(update, context):
+            log.error(f"Unhandled exception in handler: {context.error}", exc_info=context.error)
+        application.add_error_handler(on_error)
 
         # Start permission, TUI, and proactive dispatchers as background asyncio tasks
         if AUTHORIZED_USER_ID:

@@ -140,6 +140,23 @@ def test_fitness_actor_relevance_probes_food_and_fitness_timestamps():
     ]
 
 
+def test_anton_state_actor_relevance_probes_behavior_food_and_fitness_timestamps():
+    actor = {
+        **row("anton-state-tracker"),
+        "actor_type": "anton-state-tracker",
+        "last_advanced_at": "2026-08-14T10:00:00+00:00",
+    }
+    paths = []
+    with patch.object(supabase_client, "_prompt_relevance_exists",
+                      lambda path: paths.append(path) or False):
+        assert supabase_client.prompt_actor_relevance_changed(actor) is False
+    assert paths == [
+        "compulsive_behavior_tracking?select=id&created_at=gt.2026-08-14T10:00:00%2B00:00&limit=1",
+        "food_entries?select=id&created_at=gt.2026-08-14T10:00:00%2B00:00&limit=1",
+        "fitness_log?select=date&updated_at=gt.2026-08-14T10:00:00%2B00:00&limit=1",
+    ]
+
+
 def test_persistence_is_revision_checked_and_appends_bounded_history():
     actor=row(history=[{"n":n} for n in range(60)])
     parsed=parse_actor_updates(update(status="finished"),{"fitness-food-coach"})[0]
