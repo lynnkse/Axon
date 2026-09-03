@@ -101,8 +101,8 @@ class SessionManagerNode:
         self.claude_proc: Optional[subprocess.Popen] = None
         self.pty_lock = threading.Lock()
 
-        # CLINode display connection (one at a time)
-        self.display_client: Optional[socket.socket] = None
+        # Display connections — CLINode + any number of web CLI viewers
+        self.display_clients: list[socket.socket] = []
         self.display_lock = threading.Lock()
 
         # Subscribers to claude_response.sock (RouterNode, etc.)
@@ -639,11 +639,14 @@ class SessionManagerNode:
 
     def _forward_display(self, data: bytes):
         with self.display_lock:
-            if self.display_client:
+            dead = []
+            for conn in self.display_clients:
                 try:
-                    self.display_client.sendall(data)
+                    conn.sendall(data)
                 except Exception:
-                    self.display_client = None
+                    dead.append(conn)
+            for conn in dead:
+                self.display_clients.remove(conn)
 
         # Feed into PTY output buffer for TUI prompt detection
         for b in data:
@@ -1468,20 +1471,15 @@ class SessionManagerNode:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
-        server.listen(1)
+        server.listen(5)
         log.info("display.sock listening")
 
         while self._running:
             try:
                 conn, _ = server.accept()
-                log.info("CLINode display connected")
+                log.info("Display client connected (%d total)", len(self.display_clients) + 1)
                 with self.display_lock:
-                    if self.display_client:
-                        try:
-                            self.display_client.close()
-                        except Exception:
-                            pass
-                    self.display_client = conn
+                    self.display_clients.append(conn)
             except Exception:
                 break
 

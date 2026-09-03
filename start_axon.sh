@@ -68,7 +68,8 @@ start_in_session manager \
 start_in_session telegram \
     "cd '$AXON_DIR' && $PYTHON -u telegram_node.py 2>&1 | tee '$LOG_DIR/telegram.log'"
 
-# ── 3. cli — CLI node (also streamed via ttyd to browser) ────────────────────
+# ── 3. cli — CLI node (dashboard's CLI tab connects directly to the same
+#            display.sock/cli_input.sock via web_cli_bridge.py, no tmux/ttyd) ──
 start_in_session cli \
     "cd '$AXON_DIR' && $PYTHON -u cli_node.py 2>&1 | tee '$LOG_DIR/cli.log'"
 
@@ -76,20 +77,20 @@ start_in_session cli \
 start_in_session curator \
     "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
 
-# ── 5. web — Streamlit dashboard + ttyd CLI stream ───────────────────────────
+# ── 5. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
 # Both background processes are managed here; pane shows their combined status.
+# CLI tab connects straight to session_manager's display.sock/cli_input.sock
+# via web_cli_bridge.py's WebSocket relay -- no tmux/ttyd involved anymore.
 TAILSCALE_IP="$(tailscale ip -4 2>/dev/null || echo '<tailscale-ip>')"
 
 WEB_CMD="$(cat <<WEBCMD
-pkill -f 'streamlit run.*app.py' 2>/dev/null; pkill -f 'ttyd.*tmux' 2>/dev/null; sleep 1
+pkill -f 'streamlit run.*app.py' 2>/dev/null; pkill -f 'ttyd.*tmux' 2>/dev/null; pkill -f 'web_cli_bridge.py' 2>/dev/null; sleep 1
 nohup $STREAMLIT run '$AXON_DIR/dashboard/app.py' \\
   --server.port 8501 --server.address 0.0.0.0 \\
   --server.headless true --browser.gatherUsageStats false \\
   > '$DASH_LOG_DIR/streamlit.log' 2>&1 &
-/usr/bin/tmux new-session -d -s browser_view -t cli 2>/dev/null || true
-[[ -x '$TTYD' ]] && nohup '$TTYD' --port 7681 --interface 0.0.0.0 --writable \\
-  /usr/bin/tmux attach-session -t browser_view > '$DASH_LOG_DIR/ttyd.log' 2>&1 &
-echo 'Dashboard: http://$TAILSCALE_IP:8501  |  CLI stream: http://$TAILSCALE_IP:7681'
+nohup $PYTHON -u '$AXON_DIR/web_cli_bridge.py' > '$DASH_LOG_DIR/web_cli_bridge.log' 2>&1 &
+echo 'Dashboard: http://$TAILSCALE_IP:8501  (CLI tab connects directly to session_manager -- full read+write, no tmux/ttyd)'
 tail -f '$DASH_LOG_DIR/streamlit.log'
 WEBCMD
 )"

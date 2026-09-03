@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -415,6 +416,44 @@ video, iframe { border-radius: var(--axon-radius); border: 1px solid var(--axon-
   box-shadow: 0 0 20px rgba(112,113,255,.12), 0 8px 18px rgba(0,0,0,.20); transform: translateY(-1px);
 }
 .stButton > button:active, .stDownloadButton > button:active { transform: translateY(0); box-shadow: none; }
+
+/* Popover trigger buttons (project stage nodes) — futuristic glass/glow chips */
+[data-testid="stPopover"] > div > button,
+[data-testid="stPopoverButton"] {
+  color: var(--axon-text) !important;
+  background: linear-gradient(150deg, rgba(139,140,255,.14), rgba(15,20,29,.92)) !important;
+  border: 1px solid rgba(151,152,255,.30) !important; border-radius: 10px !important;
+  font-size: 13px !important; font-weight: 650 !important;
+  box-shadow: inset 0 1px rgba(255,255,255,.03), 0 0 14px rgba(112,113,255,.06) !important;
+  transition: box-shadow .18s ease, border-color .18s ease, transform .15s ease !important;
+}
+[data-testid="stPopover"] > div > button:hover,
+[data-testid="stPopoverButton"]:hover {
+  border-color: var(--axon-cyan) !important;
+  box-shadow: 0 0 22px rgba(100,216,236,.28), 0 0 10px rgba(139,140,255,.22) !important;
+  transform: translateY(-1px);
+}
+/* Popover floating panel — rendered in a Baseweb portal, may sit outside .stApp.
+   Structure varies by Streamlit version, so paint every nested div/section
+   broadly rather than guessing one exact depth. */
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] div,
+div[data-baseweb="popover"] section {
+  background: rgba(17,22,31,.98) !important;
+  color: var(--axon-text) !important;
+}
+div[data-baseweb="popover"] {
+  background: linear-gradient(160deg, rgba(21,27,37,.98), rgba(11,14,20,.98)) !important;
+  border: 1px solid rgba(151,152,255,.28) !important; border-radius: 12px !important;
+  box-shadow: 0 0 32px rgba(112,113,255,.14), 0 18px 40px rgba(0,0,0,.45) !important;
+}
+div[data-baseweb="popover"] p, div[data-baseweb="popover"] span,
+div[data-baseweb="popover"] li, div[data-baseweb="popover"] strong,
+div[data-baseweb="popover"] [data-testid="stMarkdownContainer"],
+div[data-baseweb="popover"] [data-testid="stCaptionContainer"] {
+  color: var(--axon-text) !important;
+}
+div[data-baseweb="popover"] [data-testid="stCaptionContainer"] { color: var(--axon-muted) !important; }
 [data-baseweb="select"] > div, [data-baseweb="input"] > div, textarea {
   color: var(--axon-text) !important; background: #131923 !important;
   border-color: var(--axon-line-strong) !important; border-radius: 9px !important; font-size: 14px !important;
@@ -454,6 +493,23 @@ video, iframe { border-radius: var(--axon-radius); border: 1px solid var(--axon-
   div[data-testid="stGraphVizChart"], .js-plotly-plot {
     overflow-x: auto !important; max-width: 100% !important;
   }
+  /* Stage popover buttons: full-width, comfortable touch target (min 44px) */
+  [data-testid="stPopover"] > div > button, [data-testid="stPopoverButton"] {
+    min-height: 44px !important; width: 100% !important; font-size: 13.5px !important;
+  }
+  /* Popover floating panel: keep on-screen and readable on narrow viewports */
+  div[data-baseweb="popover"] {
+    max-width: 92vw !important; min-width: min(92vw, 320px) !important;
+    left: 4vw !important; right: 4vw !important;
+  }
+  /* Data tables: smaller font + native horizontal scroll instead of squish */
+  [data-testid="stDataFrame"], [data-testid="stTable"] {
+    font-size: 12.5px !important; overflow-x: auto !important;
+  }
+  /* Images (plots) already scale via width=100%, but ensure no overflow */
+  [data-testid="stImage"] img { max-width: 100% !important; height: auto !important; }
+  /* Buttons in general: comfortable touch target */
+  .stButton > button, .stDownloadButton > button { min-height: 44px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -469,8 +525,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
+tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_cli, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
 )
 
 AILIN_DIR = Path.home() / "cognitive-hq/ailin"
@@ -884,71 +940,24 @@ with tab_projects:
 
                 stages = (project.get("metadata") or {}).get("stages")
                 if isinstance(stages, list):
-                    stage_blocks = []
-                    valid_stages = []
-                    for index, stage in enumerate(stages):
-                        if not isinstance(stage, dict):
-                            continue
-                        stage_status = stage.get("status", "planned")
-                        status_class = "in-progress" if stage_status == "in_progress" else (
-                            "done" if stage_status == "done" else "planned"
-                        )
-                        marker = "✓" if stage_status == "done" else str(index + 1)
-                        stage_name = str(stage.get("name") or f"Stage {index + 1}")
-                        valid_stages.append((stage_name, stage))
-                        stage_blocks.append(
-                            f'<div class="project-stage {status_class}">'
-                            f'<div class="project-stage-node">{html.escape(marker)}</div>'
-                            f'<div class="project-stage-name">{html.escape(stage_name)}</div>'
-                            '</div>'
-                        )
-                    if stage_blocks:
-                        st.markdown(
-                            '<div class="project-stages">' + "".join(stage_blocks) + '</div>',
-                            unsafe_allow_html=True,
-                        )
-                        selected_stage_index = st.selectbox(
-                            "Inspect stage",
-                            range(len(valid_stages)),
-                            format_func=lambda position: valid_stages[position][0],
-                            key=f"project_stage_{project_id}",
-                        )
-                        selected_stage_name, selected_stage = valid_stages[selected_stage_index]
-                        with st.container(border=True):
-                            st.markdown(
-                                '<div class="stage-detail-heading">'
-                                '<span class="stage-detail-dot"></span>'
-                                f'{html.escape(selected_stage_name)}</div>',
-                                unsafe_allow_html=True,
-                            )
-                            detail = selected_stage.get("detail")
-                            if detail:
-                                st.markdown(str(detail))
-                            else:
-                                st.caption("No stage detail recorded yet.")
+                    valid_stages = [s for s in stages if isinstance(s, dict)]
+                    if valid_stages:
+                        cols = st.columns(len(valid_stages))
+                        for index, (col, stage) in enumerate(zip(cols, valid_stages)):
+                            stage_status = stage.get("status", "planned")
+                            marker = "✓" if stage_status == "done" else "○" if stage_status == "planned" else "◐"
+                            stage_name = str(stage.get("name") or f"Stage {index + 1}")
+                            short_label = stage_name if len(stage_name) <= 18 else stage_name[:16] + "…"
+                            with col:
+                                with st.popover(f"{marker} {short_label}", use_container_width=True):
+                                    st.markdown(f"**{stage_name}**")
+                                    detail = stage.get("detail")
+                                    if detail:
+                                        st.markdown(str(detail))
+                                    else:
+                                        st.caption("No stage detail recorded yet.")
 
                 proj_metadata = project.get("metadata") or {}
-
-                data_source = proj_metadata.get("data_source")
-                if isinstance(data_source, dict) and data_source.get("path"):
-                    st.markdown(
-                        f'<div class="memory-block" style="font-family: monospace; font-size: 0.85em;">'
-                        f'📁 <strong>Data source:</strong> {html.escape(data_source["path"])}'
-                        + (f'<div class="memory-meta">{html.escape(data_source["note"])}</div>' if data_source.get("note") else "")
-                        + '</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                results_table = proj_metadata.get("results_table")
-                if isinstance(results_table, dict) and results_table.get("rows"):
-                    st.markdown(f"##### {results_table.get('title', 'Results')}")
-                    columns = results_table.get("columns") or []
-                    st.dataframe(
-                        [dict(zip(columns, row)) for row in results_table["rows"]],
-                        use_container_width=True, hide_index=True,
-                    )
-                    if results_table.get("note"):
-                        st.caption(results_table["note"])
 
                 dynamics = proj_metadata.get("dynamics_table")
                 if isinstance(dynamics, dict) and dynamics.get("rows"):
@@ -960,18 +969,61 @@ with tab_projects:
                         if dynamics.get("note"):
                             st.caption(dynamics["note"])
 
-                diagrams = proj_metadata.get("diagrams")
-                if isinstance(diagrams, list) and diagrams:
-                    cols_per_row = 2
-                    for row_start in range(0, len(diagrams), cols_per_row):
-                        row_diagrams = diagrams[row_start:row_start + cols_per_row]
-                        cols = st.columns(cols_per_row)
-                        for col, diagram in zip(cols, row_diagrams):
-                            if isinstance(diagram, dict) and diagram.get("url"):
-                                with col:
-                                    st.image(diagram["url"], caption=diagram.get("caption") or "", use_container_width=True)
-                elif proj_metadata.get("diagram_url"):
-                    st.image(proj_metadata["diagram_url"], caption=proj_metadata.get("diagram_caption") or "", use_container_width=True)
+                experiments = _sb_get(
+                    "project_experiments",
+                    f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=sequence.asc"
+                    "&select=id,name,description,data_source,results_table,dynamics_table,diagrams,notes",
+                )
+                for experiment in experiments:
+                    exp_name = experiment.get("name") or "Untitled experiment"
+                    with st.expander(f"🧪 {exp_name}", expanded=False):
+                        if experiment.get("description"):
+                            st.markdown(experiment["description"])
+
+                        exp_source = experiment.get("data_source")
+                        if isinstance(exp_source, dict) and exp_source.get("path"):
+                            st.markdown(
+                                f'<div class="memory-block" style="font-family: monospace; font-size: 0.85em;">'
+                                f'📁 <strong>Data source:</strong> {html.escape(exp_source["path"])}'
+                                + (f'<div class="memory-meta">{html.escape(exp_source["note"])}</div>' if exp_source.get("note") else "")
+                                + '</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                        exp_table = experiment.get("results_table")
+                        if isinstance(exp_table, dict) and exp_table.get("rows"):
+                            st.markdown(f"##### {exp_table.get('title', 'Results')}")
+                            columns = exp_table.get("columns") or []
+                            st.dataframe(
+                                [dict(zip(columns, row)) for row in exp_table["rows"]],
+                                use_container_width=True, hide_index=True,
+                            )
+                            if exp_table.get("note"):
+                                st.caption(exp_table["note"])
+
+                        exp_dynamics = experiment.get("dynamics_table")
+                        if isinstance(exp_dynamics, dict) and exp_dynamics.get("rows"):
+                            st.markdown(f"##### {exp_dynamics.get('title', 'Dynamics')}")
+                            st.dataframe(
+                                exp_dynamics["rows"], use_container_width=True, hide_index=True,
+                                column_config={col: st.column_config.Column(col) for col in (exp_dynamics.get("columns") or [])},
+                            )
+                            if exp_dynamics.get("note"):
+                                st.caption(exp_dynamics["note"])
+
+                        exp_diagrams = experiment.get("diagrams")
+                        if isinstance(exp_diagrams, list) and exp_diagrams:
+                            cols_per_row = 2
+                            for row_start in range(0, len(exp_diagrams), cols_per_row):
+                                row_diagrams = exp_diagrams[row_start:row_start + cols_per_row]
+                                cols = st.columns(cols_per_row)
+                                for col, diagram in zip(cols, row_diagrams):
+                                    if isinstance(diagram, dict) and diagram.get("url"):
+                                        with col:
+                                            st.image(diagram["url"], caption=diagram.get("caption") or "", use_container_width=True)
+
+                        if experiment.get("notes"):
+                            st.caption(experiment["notes"])
 
                 insights = _sb_get(
                     "insights",
@@ -1290,6 +1342,77 @@ digraph affective_prompt_blocks {
   prompt -> output;
 }
 ''', use_container_width=True)
+
+# ── Tab: CLI ────────────────────────────────────────────────────────────────
+with tab_cli:
+    st.subheader("🖥 CLI — live terminal")
+    st.caption(
+        "Connects straight to SessionManagerNode's display/input sockets — "
+        "same channel the real CLI node uses, no tmux/ttyd involved. Full "
+        "read + write, real scrollback, and safe to have open alongside "
+        "the actual terminal at once."
+    )
+    import subprocess as _sp
+    try:
+        _cli_host = _sp.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3).stdout.strip()
+    except Exception:
+        _cli_host = ""
+    if not _cli_host:
+        _cli_host = _socket.gethostbyname(_socket.gethostname())
+    _cli_bridge_port = os.environ.get("WEB_CLI_BRIDGE_PORT", "7690")
+    _cli_height = 900
+    components.html(
+        f"""
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+        <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+        <div id="axon-cli-term" style="width:100%; height:{_cli_height - 20}px; background:#0b0e14; border:1px solid #2a3242; border-radius:8px; padding:4px;"></div>
+        <script>
+        (function() {{
+          const term = new Terminal({{
+            cursorBlink: true,
+            fontSize: 13,
+            fontFamily: 'Menlo, Consolas, monospace',
+            theme: {{ background: '#0b0e14', foreground: '#edf2fa' }},
+            scrollback: 5000,
+          }});
+          const fitAddon = new FitAddon.FitAddon();
+          term.loadAddon(fitAddon);
+          term.open(document.getElementById('axon-cli-term'));
+          fitAddon.fit();
+
+          const ws = new WebSocket('ws://{_cli_host}:{_cli_bridge_port}');
+          ws.binaryType = 'arraybuffer';
+
+          ws.onopen = () => {{
+            term.write('\\r\\n\\x1b[90m[connected]\\x1b[0m\\r\\n');
+            sendResize();
+          }};
+          ws.onclose = () => term.write('\\r\\n\\x1b[90m[disconnected]\\x1b[0m\\r\\n');
+          ws.onerror = () => term.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n');
+          ws.onmessage = (ev) => {{
+            const data = new Uint8Array(ev.data);
+            term.write(data);
+          }};
+
+          term.onData((data) => {{
+            if (ws.readyState === WebSocket.OPEN) {{
+              ws.send(new TextEncoder().encode(data));
+            }}
+          }});
+
+          function sendResize() {{
+            if (ws.readyState === WebSocket.OPEN) {{
+              ws.send(JSON.stringify({{type: 'resize', rows: term.rows, cols: term.cols}}));
+            }}
+          }}
+          window.addEventListener('resize', () => {{ fitAddon.fit(); sendResize(); }});
+          term.onResize(sendResize);
+        }})();
+        </script>
+        """,
+        height=_cli_height,
+    )
 
 # ── Tab: File Viewer ──────────────────────────────────────────────────────────
 with tab_files:
