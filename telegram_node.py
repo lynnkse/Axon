@@ -1357,7 +1357,7 @@ def main():
         except KeyboardInterrupt:
             raise
         except Exception:
-            log.exception(f"run_polling() failed to start/stay up -- retrying in {backoff}s")
+            log.exception(f"run_polling() failed to start/stay up — retrying in {backoff}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120)
 
