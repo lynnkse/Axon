@@ -7,7 +7,7 @@
 # is not yet confirmed.
 
 AXON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="$HOME/cognitive-hq/ailin/logs/watchdog.log"
+LOG_FILE="$HOME/ailin/logs/watchdog.log"
 POLL_SECONDS=30
 
 log() {

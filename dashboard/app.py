@@ -529,7 +529,7 @@ tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_archi
     ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
 )
 
-AILIN_DIR = Path.home() / "cognitive-hq/ailin"
+AILIN_DIR = Path.home() / "ailin"
 
 MANIM_OUTPUT = Path.home() / "Axon/manim/output"
 MANIM_SCENES = Path.home() / "Axon/manim/scenes"
@@ -1069,8 +1069,8 @@ with tab_architecture:
     st.subheader("Axon Architecture")
     st.caption("Deployed relay views plus the corrected prompt-embedded actor design. No actor timers, polling, background process, or separate actor LLM calls.")
 
-    view_current, view_actor, view_prompt, view_affect = st.tabs(
-        ["Current system", "Actor-model design", "Prompt composition", "Affective loop"]
+    view_current, view_actor, view_prompt, view_affect, view_plugins = st.tabs(
+        ["Current system", "Actor-model design", "Prompt composition", "Affective loop", "Instance plugins (proposed)"]
     )
 
     with view_current:
@@ -1133,7 +1133,7 @@ digraph current_axon {
   hub -> interfaces [label="response sockets"];
   hub -> persistence [label="fetch context / save state"];
   background -> persistence [label="maintain / read"];
-  background -> interfaces [style=dashed, label="dashboard ttyd iframe"];
+  background -> interfaces [style=dashed, label="dashboard web_cli_bridge.py (WebSocket)"];
 }
 ''', use_container_width=True)
 
@@ -1342,6 +1342,176 @@ digraph affective_prompt_blocks {
   prompt -> output;
 }
 ''', use_container_width=True)
+
+    with view_plugins:
+        st.markdown("#### Instance-plugin architecture · Axon Codex Engine project")
+        st.caption(
+            "Found 2026-09-03 extracting Ailin's dedicated code into her own repo: Axon must never statically "
+            "import from an instance-specific repo like ~/ailin — that inverts the dependency direction "
+            "(instance depends on engine, never the reverse) and would make Axon unable to run standalone. "
+            "Same underlying fix needed for the Codex-engine swap (session_manager_codex.py). Not yet implemented."
+        )
+        st.graphviz_chart(r'''
+digraph instance_plugin_architecture {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.3, nodesep=0.6, ranksep=0.5,
+         fontname="Arial", fontsize=20, fontcolor="#E8ECF5"];
+  node [shape=plain, fontname="Arial"];
+
+  subgraph cluster_wrong {
+    label="WRONG — current risk, never do this";
+    labelloc=t; fontsize=15; fontcolor="#E05D5D"; style=dashed; color="#E05D5D";
+
+    engine_bad [label=<
+      <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#2E6F9E" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#2E6F9E"><FONT COLOR="white"><B>Axon (engine)</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">session_manager.py</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">supabase_client.py</FONT></TD></TR>
+      </TABLE>
+    >];
+    ailin_bad [label=<
+      <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#8B8CFF" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>~/ailin (instance)</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">her dedicated behavior code</FONT></TD></TR>
+      </TABLE>
+    >];
+    engine_bad -> ailin_bad [color="#E05D5D", penwidth=3, style=bold, label="import", fontcolor="#E05D5D", dir=forward];
+  }
+
+  subgraph cluster_right {
+    label="CORRECT — hook points + dynamic load";
+    labelloc=t; fontsize=15; fontcolor="#4DD4A7"; style=dashed; color="#4DD4A7";
+
+    engine_good [label=<
+      <TABLE BORDER="3" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#2E6F9E" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#2E6F9E"><FONT COLOR="white"><B>Axon (engine)</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">generic hook points:</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#DADAFF">on_tick / on_save_conversation / ...</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#A9AAFF">zero instance-specific branches</FONT></TD></TR>
+      </TABLE>
+    >];
+    config_good [label=<
+      <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#D99A2B" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#D99A2B"><FONT COLOR="white"><B>.env (per instance)</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">AILIN_EXTENSIONS_PATH=~/ailin/axon_ext.py</FONT></TD></TR>
+      </TABLE>
+    >];
+    ailin_good [label=<
+      <TABLE BORDER="3" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#8B8CFF" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#5557B8"><FONT COLOR="white"><B>~/ailin (instance)</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">axon_ext.py — plugs into the hooks</FONT></TD></TR>
+      </TABLE>
+    >];
+    codex_good [label=<
+      <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="#6B7A8F" BGCOLOR="#0F1620">
+        <TR><TD BGCOLOR="#6B7A8F"><FONT COLOR="white"><B>session_manager_codex.py</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#E8ECF5">same hook interface, Codex-backed</FONT></TD></TR>
+      </TABLE>
+    >];
+
+    config_good -> engine_good [color="#4DD4A7", penwidth=3, label="importlib.import_module(path)\nat runtime, driven by config", fontcolor="#4DD4A7"];
+    engine_good -> ailin_good [color="#4DD4A7", penwidth=2.5, style=dashed, arrowhead=empty, label="dynamic load, not import"];
+    engine_good -> codex_good [color="#4DD4A7", penwidth=2.5, style=dashed, arrowhead=empty, label="implements same hooks"];
+  }
+}
+''', use_container_width=True)
+
+        st.markdown("##### What's actually inside Ailin's behavioral code")
+        st.caption(
+            "Currently ~150-200 lines living inside Axon's own supabase_client.py/session_manager.py, "
+            "gated by `config.INSTANCE == \"ailin\"` branches. This is the code axon_ext.py would need to hold "
+            "once extracted — a real, distinct psychological model, not just different config values."
+        )
+        st.markdown(
+            """
+| Piece | What it does |
+|---|---|
+| **`apply_ailin_tick()`** | Her core state-update loop. Runs on every turn (real or internal). Reads optional `[AILIN_VALENCE: ...]` / `[AILIN_BODY: ...]` tags out of her own reply text, then updates every valence axis (comfort, threat, curiosity, attachment, etc.) and body-state area with a decay-toward-zero plus drift-toward-target — she doesn't jump to a stated feeling, she settles toward it. |
+| **`_parse_ailin_kv_tag()`** | Parses those `axis=value` tags out of her free-text replies into clamped floats — the mechanism that lets an LLM's plain-text output drive numeric state, without a separate structured-output call. |
+| **Dream tagging** (inside `apply_ailin_tick`) | If her reply contains an `[AILIN_DREAM: ...]` tag, writes it to her `dreams` table with the current tick's scalar as an impact score. Entirely tag-driven — no separate scheduled dream process exists anymore (the old Leonid version's `idle_dream_tick()` did not survive the rebuild). |
+| **`save_ailin_conversation()` / `_trigger_ailin_embed()`** | Saves every real turn to her own `conversations` table, then fires an embedding-generation call so the row becomes semantically searchable. Runs deterministically on every turn, unlike Axon's own `save_message()` which relies purely on a DB-level webhook. |
+| **`fetch_ailin_semantic_context()` / `fetch_ailin_recent_conversations()`** | Her memory retrieval — semantic similarity search over past conversations for reflection turns, plus unconditional injection of recent conversation history into the system prompt on every spawn, so a crash/restart doesn't wipe what she remembers of a real exchange. |
+| **`strip_ailin_tags()`** | Removes the raw `[AILIN_VALENCE: ...]` / `[AILIN_BODY: ...]` / `[AILIN_DREAM: ...]` tags from what actually gets sent to Anton — the state-update mechanism is invisible in the conversation itself. |
+| **`_ailin_creds()` / `_ailin_get()` / `_ailin_post()`** | Talk to her *own*, separate Supabase project (`wmvfsjegeeissxcnszik`) rather than Axon's — the credential/request layer underneath everything above. |
+| **`_pulse_ailin()`** (session_manager.py) | The internal-tick mechanism — since she has no scheduler of her own, Axon's own liveliness periodically gives her a pulse so she can update even between real conversations. |
+
+None of this is "Axon with a different Supabase URL" — it's a full separate valence/body-state model, its own memory pipeline, and its own tick source, just not yet living in its own module.
+"""
+        )
+
+        st.markdown("##### ~/ailin — what her repo holds (proposed final layout)")
+        st.caption(
+            "Already moved (2026-09-03): design docs, character-state seeds, the containerization sandbox. "
+            "Not yet moved: the actual behavioral code, still living inside Axon's own files. Below is the "
+            "target layout once the hook/plugin system above exists — nothing with a 🔧 tag has been created yet."
+        )
+        st.markdown(
+            """
+```
+~/ailin/
+├── DESIGN.md                    ✓ already here — architecture & migration decisions
+├── ailin_profile.md             ✓ already here — character/voice reference
+├── identity.json                ✓ already here — appearance, permanent traits
+├── principal_model.json         ✓ already here — Anton-model seed (likes/wants)
+├── world.json                   ✓ already here — setting, people, relationships
+│
+├── start_ailin.sh               🔧 move from ~/Axon — her launcher is instance-specific,
+├── ailin_watchdog.sh            🔧 move from ~/Axon —  not core-engine, belongs here
+│
+├── axon_ext.py                  🔧 NEW — the plugin entry point. Implements Axon's
+│                                    hook interface (on_tick, on_save_conversation, ...).
+│                                    This is the ONE thing Axon dynamically loads via
+│                                    importlib + AILIN_EXTENSIONS_PATH — everything
+│                                    below is only reachable through it.
+├── valence.py                   🔧 NEW — apply_ailin_tick, _parse_ailin_kv_tag,
+│                                    strip_ailin_tags: the decay/drift state engine
+├── memory.py                    🔧 NEW — save_ailin_conversation, _trigger_ailin_embed,
+│                                    fetch_ailin_semantic_context, fetch_ailin_recent_conversations
+├── ailin_supabase.py            🔧 NEW — _ailin_creds/_ailin_get/_ailin_post: the low-level
+│                                    REST layer to her own Supabase project (wmvfsjegeeissxcnszik)
+│
+├── sandbox/                     ✓ already here — Phase 0/1 gVisor containerization
+│   ├── Dockerfile.proxy
+│   ├── research_proxy.py
+│   └── run_sandbox.sh
+│
+├── sanitization/                ✓ already here — one-time Leonid→Supabase migration
+│                                    scripts, kept as historical record, not live code
+│
+└── logs/                        ✓ already here — runtime logs, gitignored
+```
+
+Everything marked ✓ is real, on disk, in her git history right now. Everything marked 🔧 is
+the extraction work described above — moving/splitting code out of Axon's `supabase_client.py`
+and `session_manager.py`, then building the hook interface those files would call into instead.
+"""
+        )
+
+        st.markdown("##### What changes inside Axon itself")
+        st.caption(
+            "Every one of these is currently a hardcoded `config.INSTANCE == \"ailin\"` check. "
+            "After the change, session_manager.py and supabase_client.py contain the string "
+            "\"ailin\" nowhere at all — they only know about a generic plugin object."
+        )
+        st.markdown(
+            """
+| File | Before (today) | After (proposed) |
+|---|---|---|
+| `supabase_client.py` | `apply_ailin_tick`, `strip_ailin_tags`, `save_ailin_conversation`, `_trigger_ailin_embed`, `fetch_ailin_semantic_context`, `fetch_ailin_recent_conversations`, `_ailin_creds/_get/_post`, `_parse_ailin_kv_tag` — ~150-200 lines, all Ailin-specific | **Deleted from this file entirely.** Moved to `~/ailin/valence.py`, `memory.py`, `ailin_supabase.py` (see previous section) |
+| `session_manager.py` — session start | `if config.INSTANCE == "ailin": recent = supabase_client.fetch_ailin_recent_conversations()` | `if self.instance_plugin: system_prompt = self.instance_plugin.on_session_start(system_prompt)` |
+| `session_manager.py` — user turn saved | `if config.INSTANCE == "ailin" and item.source != "reflection": supabase_client.save_ailin_conversation(role="user", ...)` | `if self.instance_plugin and item.source != "reflection": self.instance_plugin.on_user_turn(item.text)` |
+| `session_manager.py` — before response | `if config.INSTANCE == "ailin": reflection_context = supabase_client.fetch_ailin_semantic_context(item.text)` | `if self.instance_plugin: reflection_context = self.instance_plugin.on_before_response(item.text)` |
+| `session_manager.py` — after response | `if config.INSTANCE == "ailin": supabase_client.apply_ailin_tick(...); response_text = supabase_client.strip_ailin_tags(response_text)` | `if self.instance_plugin: response_text = self.instance_plugin.on_response(response_text, is_real_turn)` |
+| `session_manager.py` — response saved | `if config.INSTANCE == "ailin" and item.source != "reflection": supabase_client.save_ailin_conversation(role="ailin", ...)` | folded into the same `on_response()` call above |
+| `session_manager.py` — internal pulse | `def _pulse_ailin(self): ...` — a method with her name in its signature | `def _pulse_instance(self): if self.instance_plugin: self.instance_plugin.on_internal_pulse()` — generic, any instance can use it |
+| `session_manager.py` — startup (new) | *(doesn't exist yet)* | `self.instance_plugin = _load_instance_plugin(config.get("AXON_EXTENSIONS_PATH"))` — one new function, `importlib`-based, `None` if unset |
+| `.env` (per instance, new) | *(doesn't exist yet)* | `AXON_EXTENSIONS_PATH=~/ailin/axon_ext.py` — set only where an instance plugin exists; Axon's own main instance leaves it unset and behaves exactly as today |
+
+Net effect: **7 hardcoded call sites** in `session_manager.py` become **7 generic hook calls** through
+one `self.instance_plugin` object, **1 new loader function**, and **zero occurrences of "ailin"**
+anywhere in Axon's own source. The Codex-engine swap (`session_manager_codex.py`) would implement
+the exact same hook methods on its own side, reusing this same mechanism rather than inventing a second one.
+"""
+        )
 
 # ── Tab: CLI ────────────────────────────────────────────────────────────────
 with tab_cli:
@@ -1674,7 +1844,7 @@ with tab_ailin:
     st.subheader("🧬 Ailin — Axon-Native Rebuild")
     st.caption(
         "Design doc + schema for the rebuilt Ailin (separate Supabase project, "
-        "not the legacy Ollama/Leonid deployment). Source: ~/cognitive-hq/ailin/"
+        "not the legacy Ollama/Leonid deployment). Source: ~/ailin/"
     )
 
     ailin_design, ailin_schema = st.tabs(["Design & Status", "Schema Diagram"])

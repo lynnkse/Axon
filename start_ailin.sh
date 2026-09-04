@@ -24,7 +24,7 @@ fi
 PYENV_PYTHON="$HOME/.pyenv/versions/3.12.9/bin/python3"
 [[ -x "$VENV_PYTHON" ]] && PYTHON="$VENV_PYTHON" || PYTHON="$PYENV_PYTHON"
 
-AILIN_DIR="$HOME/cognitive-hq/ailin"
+AILIN_DIR="$HOME/ailin"
 AILIN_SOCKET_DIR="/tmp/ailin"
 AILIN_RELAY_DIR="$HOME/.claude-relay-ailin"
 LOG_DIR="$AILIN_DIR/logs"
