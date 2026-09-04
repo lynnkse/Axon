@@ -68,8 +68,15 @@ _RESPONSE_TIMEOUT = 600
 # How often to poll the session JSONL (seconds)
 _POLL_INTERVAL = 0.5
 # If file has stopped growing for this long with no "text" entry, return
-# whatever text we have (catches cases where Claude ends on a tool_use)
-_STALL_FALLBACK = 30.0
+# whatever text we have (catches cases where Claude ends on a tool_use).
+# Raised from 30s (root cause diagnosed 2026-08/09): when a response has to
+# emit a large structured actor-update block, generating it sometimes takes
+# longer than 30s, so the old timeout returned a cut-off response before the
+# actor block finished -- silently dropping the update (never persisted, so
+# actors like ailin-tick-actor stopped advancing entirely). 150s gives real
+# multi-actor responses room to finish without waiting forever on a genuine
+# stall.
+_STALL_FALLBACK = 150.0
 
 
 @dataclass
