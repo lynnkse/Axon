@@ -82,6 +82,9 @@ EXTRA_USER_IDS: str = get("TELEGRAM_EXTRA_USER_IDS", "")
 PROACTIVE_INTERVAL: int = int(get("PROACTIVE_INTERVAL", "600") or "600")
 PROACTIVE_ENABLED: bool = get("PROACTIVE_ENABLED", "1").lower() not in ("0", "false", "no")
 
+# Optional per-instance extension entry point. Unset for standard Axon instances.
+EXTENSIONS_PATH: str = get("AXON_EXTENSIONS_PATH", "")
+
 # Multi-instance (2026-08-08): identity of this Axon deployment. Instances share
 # the append-only Supabase tables (one memory) but own their alive_state /
 # anton_model rows (per-body mood). Set AXON_INSTANCE in .env per machine

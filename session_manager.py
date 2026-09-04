@@ -48,6 +48,7 @@ from typing import Optional
 
 import config
 import supabase_client
+from instance_plugin import _load_instance_plugin
 from actor_model.prompt_blocks import (
     ActorBlockError, CODE_HASH_TURN_WINDOW, output_instructions,
     parse_actor_updates, prompt_actor_rows, render_actor_inputs,
@@ -85,6 +86,7 @@ class QueueItem:
 class SessionManagerNode:
 
     def __init__(self):
+        self.instance_plugin = _load_instance_plugin(config.EXTENSIONS_PATH)
         self.input_queue: queue.Queue[Optional[QueueItem]] = queue.Queue()
         self.state = "IDLE"           # IDLE | GENERATING
         self.current_item: Optional[QueueItem] = None
