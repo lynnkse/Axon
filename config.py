@@ -82,6 +82,9 @@ EXTRA_USER_IDS: str = get("TELEGRAM_EXTRA_USER_IDS", "")
 PROACTIVE_INTERVAL: int = int(get("PROACTIVE_INTERVAL", "600") or "600")
 PROACTIVE_ENABLED: bool = get("PROACTIVE_ENABLED", "1").lower() not in ("0", "false", "no")
 
+# Optional per-instance extension entry point. Unset for standard Axon instances.
+EXTENSIONS_PATH: str = get("AXON_EXTENSIONS_PATH", "")
+
 # Multi-instance (2026-08-08): identity of this Axon deployment. Instances share
 # the append-only Supabase tables (one memory) but own their alive_state /
 # anton_model rows (per-body mood). Set AXON_INSTANCE in .env per machine
@@ -93,3 +96,10 @@ INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
 # existing conversational turn; it never starts a process, timer, or model call.
 ACTORS_ENABLED: bool = get("AXON_ACTORS", "0").lower() in ("1", "true", "yes")
 MAX_ACTOR_SLOTS: int = max(1, int(get("MAX_ACTOR_SLOTS", "4") or "4"))
+
+# Codex-backed engine (session_manager_codex.py). Distinct filenames from the
+# Claude-engine's SESSION_ID_FILE/LOCK_FILE so both engines can share one
+# RELAY_DIR without colliding if ever run side by side.
+CODEX_PATH: str = get("CODEX_PATH", "codex")
+CODEX_THREAD_ID_FILE: str = f"{RELAY_DIR}/codex_thread_id"
+CODEX_LOCK_FILE: str = f"{RELAY_DIR}/session_manager_codex.lock"

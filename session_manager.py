@@ -48,6 +48,7 @@ from typing import Optional
 
 import config
 import supabase_client
+from instance_plugin import TurnContext, _load_instance_plugin
 from actor_model.prompt_blocks import (
     ActorBlockError, CODE_HASH_TURN_WINDOW, output_instructions,
     parse_actor_updates, prompt_actor_rows, render_actor_inputs,
@@ -85,6 +86,7 @@ class QueueItem:
 class SessionManagerNode:
 
     def __init__(self):
+        self.instance_plugin = _load_instance_plugin(config.EXTENSIONS_PATH)
         self.input_queue: queue.Queue[Optional[QueueItem]] = queue.Queue()
         self.state = "IDLE"           # IDLE | GENERATING
         self.current_item: Optional[QueueItem] = None
@@ -387,6 +389,56 @@ class SessionManagerNode:
         except Exception:
             return ""
 
+    @staticmethod
+    def _turn_context(item: QueueItem) -> TurnContext:
+        return TurnContext(
+            text=item.text,
+            source=item.source,
+            user_id=item.user_id,
+            request_id=item.request_id,
+        )
+
+    def _system_prompt_instance_context(self) -> str:
+        if self.instance_plugin:
+            return self.instance_plugin.system_prompt_context()
+        if config.INSTANCE == "ailin":
+            return supabase_client.fetch_ailin_recent_conversations()
+        return ""
+
+    def _on_instance_turn_received(self, item: QueueItem) -> None:
+        if self.instance_plugin:
+            self.instance_plugin.on_turn_received(self._turn_context(item))
+        elif config.INSTANCE == "ailin" and item.source != "reflection":
+            # Only real conversation turns, not internal ticks -- her own
+            # prompt already says internal ticks produce nothing visible.
+            supabase_client.save_ailin_conversation(role="user", content=item.text)
+
+    def _instance_context_for_turn(self, item: QueueItem) -> str:
+        if self.instance_plugin:
+            return self.instance_plugin.context_for_turn(self._turn_context(item))
+        if config.INSTANCE == "ailin":
+            return supabase_client.fetch_ailin_semantic_context(item.text)
+        return supabase_client.fetch_relevant_dreams(item.text)
+
+    def _transform_instance_response(self, item: QueueItem, response_text: str) -> str:
+        if self.instance_plugin:
+            return self.instance_plugin.transform_response(
+                self._turn_context(item), response_text
+            )
+        if config.INSTANCE == "ailin":
+            supabase_client.apply_ailin_tick(
+                response_text, is_real_turn=(item.source != "reflection")
+            )
+            return supabase_client.strip_ailin_tags(response_text)
+        return response_text
+
+    def _on_instance_turn_completed(self, item: QueueItem, clean_text: str) -> None:
+        if self.instance_plugin:
+            self.instance_plugin.on_turn_completed(self._turn_context(item), clean_text)
+        elif config.INSTANCE == "ailin" and item.source != "reflection":
+            # conversations_role_check only allows 'user'/'ailin'/'system'.
+            supabase_client.save_ailin_conversation(role="ailin", content=clean_text)
+
     def _build_system_prompt(self) -> str:
         profile = self._load_profile()
         parts = []
@@ -396,14 +448,13 @@ class SessionManagerNode:
             parts.append(f"User timezone: {config.USER_TIMEZONE}")
         if profile:
             parts.append(f"\nProfile:\n{profile}")
-        if config.INSTANCE == "ailin":
+        instance_context = self._system_prompt_instance_context()
+        if instance_context:
             # Deterministic continuity: loaded once per process start (this
             # runs inside _spawn_claude), so a crash/restart doesn't wipe her
             # memory of prior real conversation turns even though nothing
             # else about her state pipeline is guaranteed to run reliably.
-            recent = supabase_client.fetch_ailin_recent_conversations()
-            if recent:
-                parts.append(f"\n{recent}")
+            parts.append(f"\n{instance_context}")
         if not config.SKIP_MEMORY_FETCH:
             # Alive state — prepend creature context if available
             alive = supabase_client.fetch_alive_state()
@@ -989,10 +1040,7 @@ class SessionManagerNode:
                 content=item.text,
                 channel=config.SESSION_CHANNEL,
             )
-            if config.INSTANCE == "ailin" and item.source != "reflection":
-                # Only real conversation turns, not internal ticks -- her own
-                # prompt already says internal ticks produce nothing visible.
-                supabase_client.save_ailin_conversation(role="user", content=item.text)
+            self._on_instance_turn_received(item)
 
             # v4: reflection idle-clock — any real user message resets it
             if item.source != "reflection":
@@ -1040,10 +1088,7 @@ class SessionManagerNode:
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules if relevant_rules else "")
             reflection_context = ""
             if item.source == "telegram":
-                if config.INSTANCE == "ailin":
-                    reflection_context = supabase_client.fetch_ailin_semantic_context(item.text)
-                else:
-                    reflection_context = supabase_client.fetch_relevant_dreams(item.text)
+                reflection_context = self._instance_context_for_turn(item)
             alive_prefix = self._alive_message_prefix()
             prefix = alive_prefix + "\n\n" + prefix if prefix else alive_prefix + "\n\n"
 
@@ -1298,18 +1343,14 @@ class SessionManagerNode:
 
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         """Persist/strip generic tags and publish; contains no actor transition work."""
-        if config.INSTANCE == "ailin":
-            supabase_client.apply_ailin_tick(response_text, is_real_turn=(item.source != "reflection"))
-            response_text = supabase_client.strip_ailin_tags(response_text)
+        response_text = self._transform_instance_response(item, response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
         supabase_client.save_message(
             role="assistant",
             content=clean_text,
             channel=config.SESSION_CHANNEL,
         )
-        if config.INSTANCE == "ailin" and item.source != "reflection":
-            # conversations_role_check only allows 'user'/'ailin'/'system'.
-            supabase_client.save_ailin_conversation(role="ailin", content=clean_text)
+        self._on_instance_turn_completed(item, clean_text)
         payload = json.dumps({
             "text": clean_text,
             "source": item.source,
