@@ -103,8 +103,7 @@ def prompt_actor_rows(
     for row in active_actor_rows(rows):
         last_advanced = _parse_timestamp(row.get("last_advanced_at"))
         must_run = (
-            int(row.get("nice", 0) or 0) <= 0
-            or bool(row.get("dirty"))
+            bool(row.get("dirty"))
             or last_advanced is None
             or (now - last_advanced).total_seconds() >= dormancy_seconds
         )

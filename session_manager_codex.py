@@ -108,6 +108,8 @@ class SessionManagerCodexNode:
         self.pty_lock = threading.Lock()
         self._spawn_time = 0.0
         self._rollouts_before_spawn: set[str] = set()
+        self._actor_prompt_turn = 0
+        self._actor_code_hash_turns: dict[str, int] = {}
 
         self.display_clients: list[socket.socket] = []
         self.display_lock = threading.Lock()
@@ -373,12 +375,21 @@ class SessionManagerCodexNode:
                     log.error("Prompt actor injection skipped because actor_state fetch failed")
                 else:
                     try:
+                        self._actor_prompt_turn += 1
                         actor_rows = prompt_actor_rows(
                             fetched_actor_rows,
                             supabase_client.prompt_actor_relevance_changed,
                             max_slots=config.MAX_ACTOR_SLOTS,
                         )
-                        actor_context = render_actor_inputs(actor_rows, {}, current_turn=1)
+                        actor_context = render_actor_inputs(
+                            actor_rows, self._actor_code_hash_turns,
+                            current_turn=self._actor_prompt_turn,
+                        )
+                        self._actor_code_hash_turns = {
+                            code_hash: turn
+                            for code_hash, turn in self._actor_code_hash_turns.items()
+                            if self._actor_prompt_turn - turn <= CODE_HASH_TURN_WINDOW
+                        }
                     except ActorBlockError as exc:
                         actor_rows = []
                         log.error("Prompt actor inputs rejected: %s", exc)
