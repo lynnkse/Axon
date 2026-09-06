@@ -99,8 +99,15 @@ ensure_session() {
 }
 
 # ── 1. manager — session manager / brain ─────────────────────────────────────
-ensure_session manager "session_manager.py" \
-    "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+# Keep the surrounding Axon interfaces identical while allowing the engine
+# owner behind their shared socket contract to change per deployment.
+if [[ "${AXON_ENGINE:-claude}" == "codex" ]]; then
+    ensure_session manager "session_manager_codex.py" \
+        "cd '$AXON_DIR' && $PYTHON -u session_manager_codex.py 2>&1 | tee '$LOG_DIR/manager.log'"
+else
+    ensure_session manager "session_manager.py" \
+        "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+fi
 
 # ── 2. telegram — Telegram gateway ───────────────────────────────────────────
 ensure_session telegram "telegram_node.py" \

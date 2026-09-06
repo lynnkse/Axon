@@ -11,6 +11,7 @@ echo "Stopping Axon processes..."
 # ── Kill the known long-running Axon processes by pattern ────────────────────
 PATTERNS=(
     "session_manager.py"
+    "session_manager_codex.py"
     "telegram_node.py"
     "cli_node.py"
     "curator.py"

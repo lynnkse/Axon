@@ -3,12 +3,11 @@ from __future__ import annotations
 """
 SessionManagerCodexNode — Codex-backed engine for Axon's relay v2 protocol.
 
-Unlike session_manager.py (one long-lived Claude Code PTY process for the
-relay's whole lifetime, response detection by polling a growing JSONL file),
-Codex CLI has a proper non-interactive mode: `codex exec [resume <id>] --json
-"<prompt>"` streams structured JSONL events to stdout and *exits* when the
-turn is done. So this engine is a per-turn subprocess spawner, not a
-persistent-PTY driver -- no PTY, no TUI-scraping, no stall-fallback timer.
+Like session_manager.py, this owns one long-lived interactive CLI process in a
+PTY.  Telegram prompts and cli_node.py keystrokes therefore enter the same
+Codex TUI, while display.sock mirrors the exact raw TUI output.  Completed
+Telegram responses are read from Codex's rollout JSONL, never scraped from the
+screen.
 
 Confirmed live event shapes (codex 0.149.1, 2026-09-05 -- these differ from
 the on-disk ~/.codex/sessions/*.jsonl rollout-file format, which is a
@@ -22,8 +21,8 @@ separate serialization; do not confuse the two):
 Sockets (same protocol as session_manager.py -- consumers don't know or care
 which engine produced a response):
   user_input.sock      — NDJSON in:  {text, source, user_id, media_path?, request_id?}
-  cli_input.sock       — not implemented (no live PTY to type into mid-turn)
-  display.sock         — raw text lines out: one human-readable line per parsed event
+  cli_input.sock       — raw keyboard bytes in: forwarded to the Codex PTY
+  display.sock         — raw Codex PTY bytes out
   claude_response.sock — NDJSON out: {text, source, user_id, request_id?}
   permission.sock      — listens but unused (codex runs with
                          --dangerously-bypass-approvals-and-sandbox, matching
@@ -45,6 +44,11 @@ import json
 import logging
 import subprocess
 import time
+import pty
+import fcntl
+import termios
+import struct
+import glob
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -99,6 +103,11 @@ class SessionManagerCodexNode:
 
         self.current_thread_id: Optional[str] = None
         self._first_turn_done = False
+        self.codex_proc: Optional[subprocess.Popen] = None
+        self.master_fd: Optional[int] = None
+        self.pty_lock = threading.Lock()
+        self._spawn_time = 0.0
+        self._rollouts_before_spawn: set[str] = set()
 
         self.display_clients: list[socket.socket] = []
         self.display_lock = threading.Lock()
@@ -177,96 +186,140 @@ class SessionManagerCodexNode:
     # Codex turn execution
     # ------------------------------------------------------------------
 
-    def _run_codex_turn(self, message_text: str) -> tuple[str, Optional[str]]:
-        """Spawn one `codex exec` (or `codex exec resume`) subprocess for a
-        single turn, stream its JSONL stdout, and return (response_text,
-        error_message). error_message is None on success."""
-        cmd = [config.CODEX_PATH, "exec"]
+    def _rollout_path(self) -> Optional[Path]:
         if self.current_thread_id:
-            # `codex exec resume` does not accept -C (its cwd is already
-            # fixed from the first turn) -- confirmed via direct testing;
-            # passing it makes the whole subprocess fail to parse args, which
-            # (combined with discarding stderr) silently looked like an empty
-            # response rather than a hard error.
+            matches = glob.glob(
+                str(Path.home() / ".codex" / "sessions" / "**" /
+                    f"*{self.current_thread_id}*.jsonl"), recursive=True)
+            if matches:
+                return Path(max(matches, key=os.path.getmtime))
+        matches = glob.glob(
+            str(Path.home() / ".codex" / "sessions" / "**" / "*.jsonl"),
+            recursive=True)
+        created = [p for p in matches if p not in self._rollouts_before_spawn]
+        return Path(max(created, key=os.path.getmtime)) if created else None
+
+    def _capture_thread_id(self) -> None:
+        path = self._rollout_path()
+        if not path:
+            return
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                first = json.loads(handle.readline())
+            thread_id = (first.get("payload") or {}).get("id")
+            if thread_id and thread_id != self.current_thread_id:
+                self.current_thread_id = thread_id
+                self._save_thread_id(thread_id)
+        except Exception:
+            pass
+
+    def _spawn_codex(self) -> None:
+        cmd = [config.CODEX_PATH]
+        if self.current_thread_id:
             cmd += ["resume", self.current_thread_id]
         else:
             cmd += ["-C", config.PROJECT_DIR]
-        cmd += [
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
-            message_text,
-        ]
-
+        cmd += ["--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"]
+        master_fd, slave_fd = pty.openpty()
+        self._set_pty_size(master_fd, 24, 80)
+        self._rollouts_before_spawn = set(glob.glob(
+            str(Path.home() / ".codex" / "sessions" / "**" / "*.jsonl"),
+            recursive=True))
+        self._spawn_time = time.time()
         proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            cwd=config.PROJECT_DIR,
         )
+        os.close(slave_fd)
+        with self.pty_lock:
+            self.master_fd = master_fd
+            self.codex_proc = proc
+        log.info("Codex TUI spawned (PID: %d)", proc.pid)
 
-        response_text = ""
-        error_message: Optional[str] = None
-        deadline = time.time() + _RESPONSE_TIMEOUT
-
+    def _set_pty_size(self, fd: int, rows: int, cols: int) -> None:
         try:
-            for line in iter(proc.stdout.readline, ""):
-                if time.time() > deadline:
-                    error_message = "Codex turn exceeded timeout"
-                    proc.kill()
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                self._forward_display(line)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
+        except Exception:
+            pass
+
+    def _pty_reader_thread(self) -> None:
+        while self._running:
+            try:
+                chunk = os.read(self.master_fd, 4096)
+            except (OSError, TypeError):
+                break
+            if not chunk:
+                break
+            self._forward_display(chunk)
+        if self._running:
+            log.error("Codex TUI exited unexpectedly")
+
+    def _write_to_pty(self, data: bytes) -> None:
+        with self.pty_lock:
+            if self.master_fd is not None:
+                os.write(self.master_fd, data)
+
+    def _wait_for_rollout_response(self, path: Path, offset: int) -> tuple[str, Optional[str]]:
+        deadline = time.time() + _RESPONSE_TIMEOUT
+        response_text = ""
+        remainder = ""
+        while time.time() < deadline and self._running:
+            time.sleep(0.2)
+            if not path.exists():
+                continue
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+            if not chunk:
+                continue
+            offset += len(chunk)
+            lines = (remainder + chunk.decode("utf-8", errors="replace")).splitlines(keepends=True)
+            remainder = ""
+            if lines and not lines[-1].endswith("\n"):
+                remainder = lines.pop()
+            for line in lines:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                payload = event.get("payload") or {}
+                if event.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "assistant":
+                    texts = [part.get("text", "") for part in payload.get("content", [])
+                             if isinstance(part, dict) and part.get("type") in {"output_text", "text"}]
+                    if texts:
+                        response_text = "".join(texts)
+                if event.get("type") == "event_msg" and payload.get("type") == "task_complete":
+                    return payload.get("last_agent_message") or response_text, None
+                if event.get("type") == "event_msg" and payload.get("type") in {"turn_aborted", "task_failed"}:
+                    return response_text, payload.get("message") or payload.get("type")
+        return response_text, "Codex turn exceeded timeout"
 
-                etype = event.get("type")
-                if etype == "thread.started" and not self.current_thread_id:
-                    tid = event.get("thread_id")
-                    if tid:
-                        self.current_thread_id = tid
-                        self._save_thread_id(tid)
-                elif etype == "item.completed":
-                    item = event.get("item") or {}
-                    if item.get("type") == "agent_message" and item.get("text"):
-                        response_text = item["text"]
-                elif etype == "turn.failed":
-                    err = event.get("error") or {}
-                    error_message = err.get("message", "unknown codex error")
-                elif etype == "turn.completed":
-                    break
-        finally:
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                proc.kill()
+    def _run_codex_turn(self, message_text: str) -> tuple[str, Optional[str]]:
+        path = self._rollout_path()
+        if path is None and not self.current_thread_id:
+            self._write_to_pty(
+                b"\x1b[200~" + message_text.encode() + b"\x1b[201~\r")
+            time.sleep(3.0)
+            self._write_to_pty(b"\r")
+            deadline = time.time() + 15
+            while path is None and time.time() < deadline:
+                time.sleep(0.2)
+                path = self._rollout_path()
+            if path is not None:
+                self._capture_thread_id()
+                return self._wait_for_rollout_response(path, 0)
+        if path is None:
+            return "", "Codex rollout file was not created"
+        self._capture_thread_id()
+        initial_size = path.stat().st_size
+        self._write_to_pty(
+            b"\x1b[200~" + message_text.encode() + b"\x1b[201~\r")
+        time.sleep(3.0)
+        self._write_to_pty(b"\r")
+        return self._wait_for_rollout_response(path, initial_size)
 
-        if not response_text and not error_message:
-            # No agent_message and no turn.failed event parsed -- either the
-            # process exited before emitting JSONL (bad args, crash) or
-            # produced unparseable output. Surface stderr so this never
-            # silently looks like a valid empty response.
-            stderr_text = ""
-            try:
-                stderr_text = (proc.stderr.read() or "").strip()
-            except Exception:
-                pass
-            error_message = (
-                f"codex exited (code={proc.returncode}) with no response: "
-                f"{stderr_text[:500]}" if stderr_text else
-                f"codex exited (code={proc.returncode}) with no response and no stderr"
-            )
-
-        return response_text, error_message
-
-    def _forward_display(self, line: str):
-        data = (line + "\n").encode()
+    def _forward_display(self, data: bytes):
         with self.display_lock:
             dead = []
             for conn in self.display_clients:
@@ -461,22 +514,54 @@ class SessionManagerCodexNode:
                     self.input_queue.put(item)
 
     def _cli_input_server_thread(self):
-        # No live PTY to type into mid-turn (each turn is a fire-and-forget
-        # subprocess) -- listen so consumers can connect without erroring,
-        # but there's nothing to forward.
         sock_path = config.CLI_INPUT_SOCK
         if os.path.exists(sock_path):
             os.unlink(sock_path)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(sock_path)
-        server.listen(5)
-        log.info("cli_input.sock listening (no-op engine)")
+        server.listen(1)
+        log.info("cli_input.sock listening")
         while self._running:
             try:
                 conn, _ = server.accept()
-                conn.close()
+                log.info("CLINode keyboard connected")
+                threading.Thread(
+                    target=self._handle_cli_input, args=(conn,), daemon=True
+                ).start()
             except Exception:
                 break
+
+    def _handle_cli_input(self, conn: socket.socket) -> None:
+        buf = b""
+        with conn:
+            while self._running:
+                try:
+                    data = conn.recv(256)
+                except Exception:
+                    break
+                if not data:
+                    break
+                buf += data
+                while b"\x00" in buf:
+                    pre, _, rest = buf.partition(b"\x00")
+                    if pre:
+                        self._write_to_pty(pre)
+                    if b"\n" not in rest:
+                        buf = b"\x00" + rest
+                        break
+                    line, _, buf = rest.partition(b"\n")
+                    try:
+                        msg = json.loads(line)
+                        if msg.get("type") == "resize" and self.master_fd is not None:
+                            self._set_pty_size(
+                                self.master_fd, int(msg["rows"]), int(msg["cols"]))
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        pass
+                else:
+                    if buf:
+                        self._write_to_pty(buf)
+                        buf = b""
+        log.info("CLINode keyboard disconnected")
 
     def _display_server_thread(self):
         sock_path = config.DISPLAY_SOCK
@@ -566,8 +651,11 @@ class SessionManagerCodexNode:
             log.info(f"Resuming thread: {self.current_thread_id[:8]}...")
             self._first_turn_done = True
 
+        self._spawn_codex()
+
         import signal as signal_module
         threads = [
+            threading.Thread(target=self._pty_reader_thread, daemon=True),
             threading.Thread(target=self._queue_processor_thread, daemon=True),
             threading.Thread(target=self._user_input_server_thread, daemon=True),
             threading.Thread(target=self._cli_input_server_thread, daemon=True),
@@ -595,6 +683,15 @@ class SessionManagerCodexNode:
         log.info("Shutting down...")
         self._running = False
         self.input_queue.put(None)
+        with self.pty_lock:
+            if self.codex_proc is not None and self.codex_proc.poll() is None:
+                self.codex_proc.terminate()
+            if self.master_fd is not None:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
         for sock_path in [
             config.USER_INPUT_SOCK, config.CLI_INPUT_SOCK, config.DISPLAY_SOCK,
             config.CLAUDE_RESPONSE_SOCK, config.PERMISSION_SOCK,
