@@ -1,0 +1,9 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim-bookworm
+RUN groupadd --gid 10002 axon-fetch && useradd --uid 10002 --gid 10002 --no-create-home axon-fetch
+WORKDIR /opt/axon-fetch
+COPY --chown=root:root sandbox /opt/axon-fetch/sandbox
+ENV PYTHONPATH=/opt/axon-fetch PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 10002:10002
+ENTRYPOINT ["python", "-m", "sandbox.research_proxy"]
+

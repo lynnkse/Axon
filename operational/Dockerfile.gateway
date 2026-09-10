@@ -1,0 +1,7 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim-bookworm
+RUN groupadd -g 10004 axon-gate && useradd -u 10004 -g 10004 --no-create-home axon-gate
+WORKDIR /opt/axon-service
+COPY --chown=root:root operational/gateway.py /opt/axon-service/gateway.py
+USER 10004:10004
+ENTRYPOINT ["python", "/opt/axon-service/gateway.py"]

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "policy_id": "step7-staging-operational",
+  "services": {
+    "claude": {"host": "api.anthropic.com", "path": "/"},
+    "codex": {"host": "api.openai.com", "path": "/v1/models"},
+    "supabase": {"host": "jcwdfuusolpxnciqgstl.supabase.co", "path": "/rest/v1/"},
+    "telegram": {"host": "api.telegram.org", "path": "/"},
+    "groq": {"host": "api.groq.com", "path": "/openai/v1/models"}
+  }
+}

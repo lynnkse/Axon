@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "policy_id": "example-readonly-research",
+  "allowed_hosts": ["en.wikipedia.org", "arxiv.org"],
+  "allowed_content_types": ["text/html", "text/plain", "application/json"],
+  "limits": {
+    "request_bytes": 8192,
+    "response_bytes": 5242880,
+    "redirects": 3,
+    "timeout_seconds": 15,
+    "concurrency": 2,
+    "requests_per_minute": 20
+  }
+}
+

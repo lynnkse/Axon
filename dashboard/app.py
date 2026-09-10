@@ -959,6 +959,54 @@ with tab_projects:
 
                 proj_metadata = project.get("metadata") or {}
 
+                open_issues = proj_metadata.get("open_issues")
+                if isinstance(open_issues, list):
+                    valid_issues = [issue for issue in open_issues if isinstance(issue, dict)]
+                    if valid_issues:
+                        st.markdown(f"##### Open issues · {len(valid_issues)}")
+                        issue_rows = []
+                        for index, issue in enumerate(valid_issues):
+                            issue_number = issue.get("issue", index + 1)
+                            issue_status = str(issue.get("status") or "open")
+                            issue_source = str(issue.get("source") or "unspecified")
+                            summary = " ".join(str(issue.get("summary") or "No summary recorded.").split())
+                            short_summary = summary if len(summary) <= 130 else summary[:127].rstrip() + "…"
+                            issue_rows.append({
+                                "#": issue_number,
+                                "Status": issue_status,
+                                "Issue": short_summary,
+                                "Source": issue_source,
+                            })
+
+                        st.dataframe(
+                            issue_rows,
+                            width="stretch",
+                            hide_index=True,
+                            height=min(390, 38 + len(issue_rows) * 35),
+                            column_config={
+                                "#": st.column_config.NumberColumn("#", width="small"),
+                                "Status": st.column_config.TextColumn("Status", width="medium"),
+                                "Issue": st.column_config.TextColumn("Issue", width="large"),
+                                "Source": st.column_config.TextColumn("Source", width="medium"),
+                            },
+                        )
+
+                        selected_issue_index = st.selectbox(
+                            "Issue details",
+                            options=list(range(len(valid_issues))),
+                            format_func=lambda issue_index: (
+                                f"Issue {valid_issues[issue_index].get('issue', issue_index + 1)} · "
+                                f"{issue_rows[issue_index]['Issue']}"
+                            ),
+                            key=f"project_issue_details_{project_id}",
+                        )
+                        selected_issue = valid_issues[selected_issue_index]
+                        st.markdown(selected_issue.get("summary") or "No summary recorded.")
+                        st.caption(
+                            f"Status: {selected_issue.get('status') or 'open'} · "
+                            f"Source: {selected_issue.get('source') or 'unspecified'}"
+                        )
+
                 dynamics = proj_metadata.get("dynamics_table")
                 if isinstance(dynamics, dict) and dynamics.get("rows"):
                     with st.expander(f"📊 {dynamics.get('title', 'Dynamics')}", expanded=False):
@@ -1004,9 +1052,11 @@ with tab_projects:
                         exp_dynamics = experiment.get("dynamics_table")
                         if isinstance(exp_dynamics, dict) and exp_dynamics.get("rows"):
                             st.markdown(f"##### {exp_dynamics.get('title', 'Dynamics')}")
+                            columns = exp_dynamics.get("columns") or []
                             st.dataframe(
-                                exp_dynamics["rows"], use_container_width=True, hide_index=True,
-                                column_config={col: st.column_config.Column(col) for col in (exp_dynamics.get("columns") or [])},
+                                [dict(zip(columns, row)) for row in exp_dynamics["rows"]],
+                                use_container_width=True, hide_index=True,
+                                column_config={col: st.column_config.Column(col) for col in columns},
                             )
                             if exp_dynamics.get("note"):
                                 st.caption(exp_dynamics["note"])

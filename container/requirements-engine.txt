@@ -1,0 +1,11 @@
+# Dependencies imported by the accepted supervised engine process set.
+# MCP/Zhipu are deliberately excluded: their pinned PyJWT requirements conflict,
+# and their auxiliary processes are not enabled in the engine image.
+python-telegram-bot==22.7
+openai==2.38.0
+groq==1.1.2
+httpx==0.28.1
+python-dotenv==1.2.2
+PyMuPDF==1.27.2.3
+anthropic==1.4.0
+

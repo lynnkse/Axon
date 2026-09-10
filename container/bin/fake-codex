@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Offline PTY child used only when AXON_OFFLINE_SMOKE=1."""
+import os
+import signal
+import sys
+import time
+
+running = True
+signal.signal(signal.SIGTERM, lambda *_: globals().__setitem__("running", False))
+os.write(sys.stdout.fileno(), b"offline codex fixture ready\r\n")
+while running:
+    time.sleep(0.2)
+

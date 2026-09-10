@@ -174,6 +174,7 @@ def _prompt_relevance_exists(path: str) -> bool | None:
 
 AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
 CONDOR_CHECK_COOLDOWN_SECONDS = 15 * 60
+CODEX_USAGE_CHECK_COOLDOWN_SECONDS = 60 * 60
 
 
 def latest_codex_weekly_usage() -> tuple[float, int] | None:
@@ -236,15 +237,11 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
         elapsed = _actor_elapsed(actor_row, "last_check_at")
         return elapsed is None or elapsed >= CONDOR_CHECK_COOLDOWN_SECONDS
     if kind == "codex-usage-monitor":
-        usage = latest_codex_weekly_usage()
-        if usage is None:
-            return None
-        used_percent, _ = usage
-        state = actor_row.get("state") or {}
-        last_reported = float(state.get("last_reported_percent") or 0)
-        report_step = max(1.0, float(state.get("report_step_percent") or 5))
-        return (used_percent >= last_reported + report_step
-                or used_percent + report_step < last_reported)
+        # The standalone monitor advances this actor without spending a model
+        # turn. Prompt injection is only a fail-safe if that daemon has stopped
+        # advancing the row for two complete check periods.
+        elapsed = _actor_elapsed(actor_row, "last_check_at")
+        return elapsed is None or elapsed >= 2 * CODEX_USAGE_CHECK_COOLDOWN_SECONDS
     if kind == "ailin-health-actor":
         # The watchdog is checked periodically on its owning host, not on every chat.
         elapsed = _actor_elapsed(actor_row)
