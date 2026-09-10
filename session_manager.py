@@ -800,22 +800,27 @@ class SessionManagerNode:
     # JSONL response detection
     # ------------------------------------------------------------------
 
-    def _get_jsonl_state(self, session_file: Path, offset: int) -> tuple[Optional[str], Optional[str]]:
+    def _get_jsonl_state(self, session_file: Path, offset: int) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Scan assistant entries from `offset`.
-        Returns (combined_text, last_assistant_type) where:
+        Returns (combined_text, last_assistant_type, last_stop_reason) where:
           combined_text        — all assistant text blocks joined with double newline
           last_assistant_type  — content type of the very last assistant entry
                                  ("text", "tool_use", "thinking", …)
+          last_stop_reason     — the `stop_reason` field of the very last assistant
+                                 message object ("tool_use" while more turns are
+                                 coming, "end_turn" only once Claude has truly
+                                 finished generating for this turn).
 
         Accumulates ALL text blocks across entries so multi-step responses
         (text → tool_use → text) are not truncated to just the final block.
         """
         text_blocks: list[str] = []
         last_assistant_type: Optional[str] = None
+        last_stop_reason: Optional[str] = None
         try:
             if not session_file.exists():
-                return None, None
+                return None, None, None
             with open(session_file, "r", encoding="utf-8", errors="replace") as f:
                 f.seek(offset)
                 for line in f:
@@ -827,6 +832,7 @@ class SessionManagerNode:
                         msg = obj.get("message", {})
                         if msg.get("role") != "assistant":
                             continue
+                        last_stop_reason = msg.get("stop_reason", last_stop_reason)
                         content = msg.get("content", "")
                         if isinstance(content, list):
                             for c in content:
@@ -847,7 +853,7 @@ class SessionManagerNode:
         except Exception:
             pass
         combined = "\n\n".join(text_blocks) if text_blocks else None
-        return combined, last_assistant_type
+        return combined, last_assistant_type, last_stop_reason
 
     def _sessions_dir(self) -> Path:
         project_name = config.PROJECT_DIR.replace("/", "-").replace("_", "-")
@@ -883,6 +889,7 @@ class SessionManagerNode:
             # Known session — poll the specific file.
             last_text: Optional[str] = None
             last_assistant_type: Optional[str] = None
+            last_stop_reason: Optional[str] = None
             last_file_size = initial_size
             last_activity_time: float = 0.0
             activity_seen = False
@@ -899,19 +906,28 @@ class SessionManagerNode:
                     last_file_size = current_size
                     last_activity_time = time.time()
                     self._publish_activity(growing=True)
-                    text, atype = self._get_jsonl_state(session_file, initial_size)
+                    text, atype, sreason = self._get_jsonl_state(session_file, initial_size)
                     if text:
                         last_text = text
                         _partial_text = text
                     if atype:
                         last_assistant_type = atype
+                    if sreason:
+                        last_stop_reason = sreason
 
                 elapsed = time.time() - last_activity_time
-                # Primary: last entry is "text" and file has been quiet for DEBOUNCE.
+                # Primary: Claude Code has truly finished this turn (stop_reason
+                # "end_turn", not "tool_use" — which means more is still coming
+                # regardless of how long the file has been quiet). A short
+                # debounce is kept only to let the final write settle on disk;
+                # it is not itself the completion signal anymore, since a natural
+                # pause between a text block and the next tool call used to
+                # satisfy the old "quiet for DEBOUNCE" check and return a
+                # truncated mid-turn response.
                 if (
                     activity_seen
                     and last_text
-                    and last_assistant_type == "text"
+                    and last_stop_reason == "end_turn"
                     and elapsed >= _DEBOUNCE
                 ):
                     log.info(f"Response complete ({len(last_text)} chars)")
@@ -942,6 +958,7 @@ class SessionManagerNode:
             # Per-file debounce state.
             file_last_text: dict[Path, Optional[str]] = {}
             file_last_atype: dict[Path, Optional[str]] = {}
+            file_last_stop_reason: dict[Path, Optional[str]] = {}
             file_last_size: dict[Path, int] = {}
             file_last_activity: dict[Path, float] = {}
             file_activity_seen: dict[Path, bool] = {}
@@ -964,17 +981,22 @@ class SessionManagerNode:
                             file_last_size[f] = current_size
                             file_last_activity[f] = time.time()
                             self._publish_activity(growing=True)
-                            text, atype = self._get_jsonl_state(f, offset)
+                            text, atype, sreason = self._get_jsonl_state(f, offset)
                             if text:
                                 file_last_text[f] = text
                                 _partial_text = text
                             if atype:
                                 file_last_atype[f] = atype
+                            if sreason:
+                                file_last_stop_reason[f] = sreason
 
+                        # Same fix as the known-session path: gate on the real
+                        # end-of-turn signal (stop_reason == "end_turn"), not on
+                        # an arbitrary quiet period after a text block.
                         if (
                             file_activity_seen.get(f)
                             and file_last_text.get(f)
-                            and file_last_atype.get(f) == "text"
+                            and file_last_stop_reason.get(f) == "end_turn"
                             and (time.time() - file_last_activity.get(f, 0)) >= _DEBOUNCE
                         ):
                             sid = f.stem
