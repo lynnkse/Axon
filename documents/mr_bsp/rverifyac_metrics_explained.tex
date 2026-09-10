@@ -1,0 +1,385 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array,longtable,xcolor,enumitem,hyperref,listings}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\hypersetup{colorlinks=true,linkcolor=blue!55!black,urlcolor=blue!55!black}
+\setlist{nosep,leftmargin=*}
+\newcommand{\Cl}{\operatorname{Cl}}
+\newcommand{\I}{\mathbb{I}}
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  frame=single,
+  breaklines=true,
+  showstringspaces=false,
+  keywordstyle=\color{blue!55!black},
+  commentstyle=\color{green!40!black}
+}
+
+\title{R-VerifyAC Metrics Explained\\
+\large Cumulative likelihood, confidence, $\epsilon$, and entropy}
+\author{ANPLOS / MR-BSP working note}
+\date{7 September 2026}
+
+\begin{document}
+\maketitle
+
+\section{The one-sentence interpretation}
+
+R-VerifyAC asks:
+\begin{quote}
+Across plausible realizations of the missing observations, how often would the
+joint action selected in Step~1 still be optimal?
+\end{quote}
+
+That probability is the action's \emph{cumulative likelihood}.  In the
+continuous-observation implementation it is estimated by Monte Carlo sampling.
+The variable named \texttt{confidence} is the estimated cumulative likelihood
+of the particular action selected in Step~1.
+
+\section{From belief and entropy to a winning action}
+
+Let $\bar a$ denote the joint action selected from the current belief in
+Step~1.  For every hypothetical missing-observation sample $z^{(i)}$, the
+algorithm constructs the corresponding hypothetical belief $b^{(i)}$ and
+evaluates every candidate joint action:
+\[
+    a_i^* = \arg\max_{a\in\mathcal A} J\!\left(b^{(i)},a\right).
+\]
+
+In the present experiments, $J$ is an entropy-based or hybrid objective.  A
+schematic hybrid form is
+\[
+    J(b,a) = -\beta H(b,a) - (1-\beta)L(a),
+\]
+where $H$ is the predicted focused entropy and $L$ is path length.  The exact
+objective determines which action wins each sample.  After the winner is
+identified, however, the magnitude of the entropy is not accumulated into the
+confidence calculation.
+
+\section{Cumulative likelihood}
+
+For an action $a$, define the region of missing-observation space in which that
+action is optimal:
+\[
+    \operatorname{cobs}_a(\mathcal Z)
+    = \left\{z\in\mathcal Z:
+      a=\arg\max_{a'\in\mathcal A}J(b(z),a')\right\}.
+\]
+
+The theoretical cumulative likelihood is the probability mass of that region:
+\[
+    \Cl_a
+    = \Pr\!\left(a^*(Z)=a\mid\mathcal H_k^c\right)
+    = \int_{\mathcal Z}
+      p(z\mid\mathcal H_k^c)
+      \I\!\left[a^*(z)=a\right],dz.
+\]
+
+``Cumulative'' means that the probability mass of \emph{all observations that
+favor the same action} is combined.  It does not mean cumulative over
+communication iterations, and it does not mean cumulative entropy.
+
+If the possible actions partition the observation space without ambiguous
+ties, then
+\[
+    \sum_{a\in\mathcal A}\Cl_a=1.
+\]
+
+\section{Monte Carlo estimate and the code's confidence}
+
+Suppose the algorithm draws $N$ equally weighted samples from the missing-data
+distribution.  Its estimator is
+\[
+    \widehat{\Cl}_a
+    = \frac{1}{N}\sum_{i=1}^{N}\I[a_i^*=a]
+    = \frac{\#\{i:a_i^*=a\}}{N}.
+\]
+
+For the Step-1 action $\bar a$, the implementation stores
+\[
+    \texttt{confidence}=\widehat{\Cl}_{\bar a}.
+\]
+
+\subsection*{Meaning of every symbol}
+
+The symbols in the estimator have the following precise meanings:
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\textwidth}
+                  >{\raggedright\arraybackslash}p{0.72\textwidth}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endfirsthead
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+\midrule
+\multicolumn{2}{r}{\small Continued on the next page}\\
+\endfoot
+\bottomrule
+\endlastfoot
+$\mathcal A$ & The finite set of candidate joint actions being compared by the multi-robot planner.  An element $a\in\mathcal A$ specifies one complete candidate choice for the robot team. \\
+
+$a$ & One particular candidate joint action whose cumulative likelihood is being calculated.  The estimator can be calculated separately for every $a\in\mathcal A$. \\
+
+$\bar a$ & The particular joint action selected as optimal in Step~1 using the robot's current local belief, before the missing observations are sampled. \\
+
+$N$ & The total number of Monte Carlo missing-observation samples.  Experiments 23 and 24 use $N=10$ for each Step-2/Step-3 calculation. \\
+
+$i$ & The index of one Monte Carlo sample, with $i\in\{1,\ldots,N\}$. \\
+
+$z^{(i)}$ & The $i$th hypothetical realization of the observations currently missing from the reasoning robot's belief.  It is drawn from the missing-observation distribution implied by the belief and observation model. \\
+
+$b^{(i)}$ & The hypothetical belief obtained after incorporating sample $z^{(i)}$.  The planner evaluates all candidate actions under this belief. \\
+
+$J(b^{(i)},a)$ & The planning objective assigned to candidate action $a$ under hypothetical belief $b^{(i)}$.  Entropy influences the estimator through this objective because it can change which action maximizes $J$. \\
+
+$a_i^*$ & The winning joint action in sample $i$: $a_i^*=\arg\max_{a'\in\mathcal A}J(b^{(i)},a')$.  The implementation records this winner as \texttt{opt\_action}. \\
+
+$\I[a_i^*=a]$ & Indicator function.  Its value is 1 if sample $i$ selects action $a$, and 0 otherwise. \\
+
+$\sum_{i=1}^{N}$ & Adds the indicator values over all samples.  Because every term is either 0 or 1, the sum is exactly the number of samples favoring $a$. \\
+
+$\#\{i:a_i^*=a\}$ & The cardinality, or count, of sample indices for which action $a$ wins.  It is another notation for the preceding sum.  Equivalently one may write $|\{i:a_i^*=a\}|$. \\
+
+$\Cl_a$ & The true cumulative likelihood of action $a$: the probability, over the complete missing-observation distribution, that $a$ would be optimal.  This is the ideal quantity that would be obtained by integrating over all possible missing observations. \\
+
+$\widehat{\Cl}_a$ & The Monte Carlo estimate of $\Cl_a$.  The hat indicates that it is estimated from a finite sample rather than known exactly. \\
+
+$\widehat{\Cl}_{\bar a}$ & The estimated cumulative likelihood specifically for the Step-1 action.  In plain language, it is the fraction of sampled missing-data scenarios in which the original Step-1 choice remains optimal. \\
+
+\texttt{confidence} & The implementation's name for $\widehat{\Cl}_{\bar a}$.  More precisely, the top-level stored value is the reference robot's Step-2 estimate; Step~3 has a separate estimate used in the final Boolean acceptance decision. \\
+\end{longtable}
+
+For one individual sample, the indicator contribution is therefore
+\[
+    \I[a_i^*=a]
+    =
+    \begin{cases}
+        1, & \text{if action $a$ maximizes the objective in sample $i$},\\
+        0, & \text{otherwise}.
+    \end{cases}
+\]
+
+For example, if $N=10$ and action $a$ wins samples
+$\{1,2,4,6,8,10\}$, then
+\[
+    \sum_{i=1}^{10}\I[a_i^*=a]=6,
+    \qquad
+    \widehat{\Cl}_a=\frac{6}{10}=0.6.
+\]
+
+The estimator assumes that the samples are drawn from the intended
+missing-observation distribution and are equally weighted.  If samples were
+drawn from a different proposal distribution, the simple count ratio would
+generally need to be replaced by a weighted importance-sampling estimator.
+
+Therefore, \texttt{confidence} is best read as
+\emph{estimated support probability of the Step-1 action under sampled missing
+observations}.  It is not a covariance confidence interval, localization
+confidence, mean reward, or entropy value.
+
+\subsection*{Example}
+
+With $N=10$ samples, suppose the winning actions are
+\[
+    (3,3,1,3,0,3,1,3,0,3).
+\]
+The estimated cumulative-likelihood distribution is
+\[
+    \widehat{\Cl}_0=0.2,\qquad
+    \widehat{\Cl}_1=0.2,\qquad
+    \widehat{\Cl}_3=0.6.
+\]
+If Step~1 selected action 3, then \texttt{confidence}$=0.6$.  If Step~1
+selected action 1, then \texttt{confidence}$=0.2$.
+
+\subsection*{The corresponding implementation}
+
+The following is the relevant calculation from
+\texttt{mrbsp/modules/evaluators/multi\_robot.py}.  The helper first builds the
+sampled cumulative-likelihood distribution over all actions.  The later lines
+extract the value belonging to the Step-1 action and store it as
+\texttt{confidence}.
+
+\begin{lstlisting}[language=Python]
+def get_cl_per_action(choices):
+    choices_per_action = {
+        i: 0
+        for i in range(len(list(choices.values())[0]["rewards"]))
+    }
+
+    # Number of supporting samples for each action choice.
+    for sample_data in choices.values():
+        mr_choice = sample_data["opt_action"]
+        choices_per_action[mr_choice] += 1
+
+    cl_per_action = {
+        action: choices_per_action[action] / len(choices)
+        for action in choices_per_action
+    }
+    return cl_per_action
+
+cls_s2 = get_cl_per_action(result["step_2"])
+step_1_action = result["step_1"]["optimal_action_idx"]
+cl_s2 = cls_s2.get(step_1_action, 0)
+confidence = cl_s2
+\end{lstlisting}
+
+For the numerical example above, the resulting dictionary would contain
+\begin{lstlisting}[language=Python]
+cls_s2 = {0: 0.2, 1: 0.2, 2: 0.0, 3: 0.6}
+step_1_action = 3
+confidence = cls_s2[step_1_action]  # 0.6
+\end{lstlisting}
+
+The original source uses the same count-divided-by-sample-count operation; the
+excerpt is reformatted only to make it fit and read clearly on the page.
+
+\section{What $\epsilon$ controls}
+
+$\epsilon$ is a relaxation or tolerated-risk parameter.  The probabilistic
+branch uses the threshold
+\[
+    \widehat{\Cl}_{\bar a} > 1-\epsilon.
+\]
+
+Thus a smaller $\epsilon$ is stricter, while a larger $\epsilon$ is more
+permissive.  In particular, $\epsilon=0.7$ does \emph{not} mean 70\% confidence;
+it produces a support threshold of $1-0.7=0.3$.
+
+Because the implementation uses a strict inequality, the required counts for
+$N=10$ are:
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+$\epsilon$ & Implemented threshold & Minimum supporting samples \\
+\midrule
+0.1 & $\widehat{\Cl}_{\bar a}>0.9$ & 10/10 \\
+0.3 & $\widehat{\Cl}_{\bar a}>0.7$ & 8/10 \\
+0.5 & $\widehat{\Cl}_{\bar a}>0.5$ & 6/10 \\
+0.7 & $\widehat{\Cl}_{\bar a}>0.3$ & 4/10 \\
+0.9 & $\widehat{\Cl}_{\bar a}>0.1$ & 2/10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The complete acceptance rule}
+
+The threshold is only one branch of the implemented rule.  For each of
+Steps~2 and~3, the implementation accepts the Step-1 action when
+\[
+    \left[
+      \widehat{\Cl}_{\bar a}=\max_{a\in\mathcal A}\widehat{\Cl}_a
+    \right]
+    \quad\lor\quad
+    \left[
+      \widehat{\Cl}_{\bar a}>1-\epsilon
+    \right].
+\]
+
+The robot accepts R-VerifyAC only when this is true in \emph{both} Step~2 and
+Step~3:
+\[
+    \operatorname{Accept}_r(\bar a)
+    = \operatorname{Accept}^{(2)}_r(\bar a)
+      \land
+      \operatorname{Accept}^{(3)}_r(\bar a).
+\]
+
+The first branch is the modal-action branch: the Step-1 action has the largest
+sampled support.  The second is the $1-\epsilon$ probabilistic branch.  As a
+result, a Step-1 action can pass even below the numerical threshold when it is
+modal.
+
+For example, if ten samples produce counts $(3,3,2,2)$ and the Step-1 action is
+one of the actions with three votes, the current code accepts it through the
+modal branch even when $\epsilon=0.7$, because $0.3>0.3$ is false but $0.3$ is
+tied for the maximum.
+
+\section{Step 2 versus Step 3}
+
+The same calculation is performed from two complementary reasoning directions:
+
+\begin{itemize}
+    \item Step~2 asks how the reasoner's preferred action changes across
+    plausible missing observations of its peer.
+    \item Step~3 mirrors that reasoning from the peer's side.
+\end{itemize}
+
+Consequently there are two relevant support estimates per robot,
+$\widehat{\Cl}^{(2)}_{\bar a}$ and
+$\widehat{\Cl}^{(3)}_{\bar a}$.  A single scalar called \texttt{conf} cannot by
+itself represent the complete acceptance decision.
+
+\section{Important implementation audit findings}
+
+\begin{enumerate}
+    \item \textbf{The top-level \texttt{conf} field is Step~2 only.}
+    The main evaluator stores \texttt{conf} as the reference robot's Step~2
+    value, although final acceptance depends on both Step~2 and Step~3.
+
+    \item \textbf{Ties are accepted by the code.}
+    The implementation tests equality with the maximum sampled support.  The
+    paper defines the rank-1 action using strict dominance over every other
+    action.  Therefore a tied modal action passes in code but does not satisfy
+    that strict unique-rank-1 definition.
+
+    \item \textbf{A legacy post-processing path uses a different rule.}
+    It chooses the first iteration satisfying
+    \texttt{conf >= prob\_threshold}.  This uses only Step~2, uses
+    greater-than-or-equal instead of strict greater-than, and omits the explicit
+    Step~3/modal structure.  It should not be treated as the authoritative
+    R-VerifyAC acceptance test.
+
+    \item \textbf{Finite-sample uncertainty is separate from $\epsilon$.}
+    $\epsilon$ sets the desired support threshold.  It does not quantify how
+    accurate $\widehat{\Cl}$ is as an estimate of the true $\Cl$.  That requires
+    a separate concentration parameter and a bound such as Hoeffding's
+    inequality.
+\end{enumerate}
+
+\section{Terminology recommended for tables and plots}
+
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.28\textwidth}
+                >{\raggedright\arraybackslash}p{0.62\textwidth}}
+\toprule
+Use & Meaning \\
+\midrule
+Estimated cumulative likelihood & $\widehat{\Cl}_a$, the sampled support of any action $a$ \\
+Step-2 support of Step-1 action & $\widehat{\Cl}^{(2)}_{\bar a}$ \\
+Step-3 support of Step-1 action & $\widehat{\Cl}^{(3)}_{\bar a}$ \\
+Acceptance threshold & $1-\epsilon$ \\
+R-VerifyAC accepted & Both Step-2 and Step-3 Boolean tests passed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Avoid presenting \texttt{confidence} without specifying the step, and avoid
+the phrase ``cumulative entropy.''
+
+\section{Code locations audited}
+
+\begin{itemize}
+    \item Per-action sample fractions and acceptance:
+    \texttt{mrbsp/modules/evaluators/multi\_robot.py}, lines 1167--1178 and
+    1249--1259.
+    \item Stored top-level \texttt{conf}:
+    the same file, line 1384.
+    \item Experiment defaults:
+    \texttt{scenarios/anpl\_mobile\_platform/scripts/multi\_robot\_planning.py},
+    lines 2643--2645.
+    \item Legacy confidence-only iteration selection:
+    the same file, lines 3311--3315.
+    \item Paper definition and estimator:
+    \texttt{continuous-and-high-dim-cases.tex}, cumulative-likelihood section.
+\end{itemize}
+
+\end{document}
