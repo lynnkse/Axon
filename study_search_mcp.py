@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def _load_env() -> dict:
-    env_path = Path(__file__).parent.parent / ".env"
+    env_path = Path(__file__).parent / ".env"
     result = {}
     try:
         for line in env_path.read_text().splitlines():
