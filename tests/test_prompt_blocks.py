@@ -157,6 +157,20 @@ def test_anton_state_actor_relevance_probes_behavior_food_and_fitness_timestamps
     ]
 
 
+def test_codex_usage_actor_is_only_prompted_if_hourly_daemon_is_stale():
+    recent = {
+        **row("codex-usage-monitor"),
+        "actor_type": "codex-usage-monitor",
+        "state": {"last_check_at": datetime.now(timezone.utc).isoformat()},
+    }
+    stale = {
+        **recent,
+        "state": {"last_check_at": "2026-01-01T00:00:00Z"},
+    }
+    assert supabase_client.prompt_actor_relevance_changed(recent) is False
+    assert supabase_client.prompt_actor_relevance_changed(stale) is True
+
+
 def test_persistence_is_revision_checked_and_appends_bounded_history():
     actor=row(history=[{"n":n} for n in range(60)])
     parsed=parse_actor_updates(update(status="finished"),{"fitness-food-coach"})[0]

@@ -1,5 +1,5 @@
 #!/bin/bash
-# start_web.sh — bring up just the web dashboard (Streamlit + CLI/RALPH ttyd streams)
+# start_web.sh — bring up just the web dashboard (Streamlit + CLI ttyd stream)
 #
 # Standalone version of start_axon.sh's "web" pane, for running by hand in a
 # single tmux pane without the full 5-pane orchestration. Same portability
@@ -32,24 +32,19 @@ nohup "$STREAMLIT" run "$AXON_DIR/dashboard/app.py" \
   --server.headless true --browser.gatherUsageStats false \
   > "$DASH_LOG_DIR/streamlit.log" 2>&1 &
 
-# CLI/RALPH view sessions — mirror sessions ttyd attaches to. Require the
-# real "cli" / "ralph" tmux sessions to already exist under those exact names.
+# CLI view session — mirrors the session ttyd attaches to. Requires the
+# real "cli" tmux session to already exist under that exact name.
 tmux new-session -d -s browser_view -t cli 2>/dev/null || echo "  (no 'cli' tmux session found yet — browser_view not created)"
-tmux new-session -d -s ralph_view   -t ralph 2>/dev/null || echo "  (no 'ralph' tmux session found yet — ralph_view not created)"
 
 if [[ -x "$TTYD" ]]; then
     echo "Starting ttyd CLI stream on :7681..."
     nohup "$TTYD" --port 7681 --interface 0.0.0.0 --writable \
       /usr/bin/tmux attach-session -t browser_view > "$DASH_LOG_DIR/ttyd.log" 2>&1 &
-    echo "Starting ttyd RALPH stream on :7682..."
-    nohup "$TTYD" --port 7682 --interface 0.0.0.0 --writable \
-      /usr/bin/tmux attach-session -t ralph_view > "$DASH_LOG_DIR/ttyd_ralph.log" 2>&1 &
 else
-    echo "  ttyd binary not found/executable at $TTYD — skipping CLI/RALPH streams"
+    echo "  ttyd binary not found/executable at $TTYD — skipping CLI stream"
 fi
 
 sleep 1
 echo
 echo "Dashboard:   http://$TAILSCALE_IP:8501"
 echo "CLI stream:  http://$TAILSCALE_IP:7681"
-echo "RALPH stream: http://$TAILSCALE_IP:7682"

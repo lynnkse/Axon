@@ -25,3 +25,7 @@ __pycache__/
 
 # Local virtualenv
 axon_env/
+
+# LaTeX build artifacts
+*.aux
+*.out

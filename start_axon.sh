@@ -1,7 +1,7 @@
 #!/bin/bash
 # start_axon.sh — bring up the full Axon stack from a clean slate
 #
-# manager | telegram | cli | curator | web
+# manager | telegram | cli | curator | usage | web
 #
 # Always starts by running shutdown_axon.sh to kill every known Axon process
 # and tmux session first, then brings everything back up fresh. This trades
@@ -12,6 +12,25 @@
 # duplicates, always ends in a known-good state.
 
 AXON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CLEAR_CODEX_SESSION=0
+for arg in "$@"; do
+    case "$arg" in
+        --clear)
+            CLEAR_CODEX_SESSION=1
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--clear]"
+            echo "  --clear  Start Codex in a new thread instead of resuming the saved thread."
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option: $arg" >&2
+            echo "Usage: $0 [--clear]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 if [[ -x "$AXON_DIR/shutdown_axon.sh" ]]; then
     "$AXON_DIR/shutdown_axon.sh"
@@ -24,6 +43,17 @@ fi
 # processes load .env themselves via python-dotenv, but this launcher script
 # needs it too since it picks the interpreter before Python ever runs.
 [[ -f "$AXON_DIR/.env" ]] && set -a && source "$AXON_DIR/.env" && set +a
+
+# The Codex session manager normally resumes the thread ID saved here. Clearing
+# only this pointer makes the next manager launch create a genuinely new Codex
+# thread; the old rollout remains on disk and can still be inspected manually.
+if (( CLEAR_CODEX_SESSION )); then
+    AXON_RELAY_DIR="${RELAY_DIR:-$HOME/.claude-relay}"
+    SAVED_CODEX_THREAD_ID="$AXON_RELAY_DIR/codex_thread_id"
+    rm -f -- "$SAVED_CODEX_THREAD_ID"
+    echo "Cleared saved Codex thread ID; starting a new Codex session."
+fi
+
 # Multi-machine (2026-08-09): AXON_PYTHON_DIR lets each deployment point at its
 # own venv (e.g. aevadim-09's pyenv-virtualenv "claude-relay") without editing
 # this script. Set it in .env or export before running. Falls back to ROG's
@@ -99,8 +129,15 @@ ensure_session() {
 }
 
 # ── 1. manager — session manager / brain ─────────────────────────────────────
-ensure_session manager "session_manager.py" \
-    "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+# Keep the surrounding Axon interfaces identical while allowing the engine
+# owner behind their shared socket contract to change per deployment.
+if [[ "${AXON_ENGINE:-claude}" == "codex" ]]; then
+    ensure_session manager "session_manager_codex.py" \
+        "cd '$AXON_DIR' && $PYTHON -u session_manager_codex.py 2>&1 | tee '$LOG_DIR/manager.log'"
+else
+    ensure_session manager "session_manager.py" \
+        "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+fi
 
 # ── 2. telegram — Telegram gateway ───────────────────────────────────────────
 ensure_session telegram "telegram_node.py" \
@@ -115,7 +152,11 @@ ensure_session cli "cli_node.py" \
 ensure_session curator "curator.py" \
     "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
 
-# ── 5. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
+# ── 5. usage — deterministic hourly Codex quota monitor ─────────────────────
+ensure_session usage "codex_usage_monitor.py" \
+    "cd '$AXON_DIR' && $PYTHON -u codex_usage_monitor.py 2>&1 | tee '$LOG_DIR/codex_usage_monitor.log'"
+
+# ── 6. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
 # Both background processes are managed here; pane shows their combined status.
 # CLI tab connects straight to session_manager's display.sock/cli_input.sock
 # via web_cli_bridge.py's WebSocket relay -- no tmux/ttyd involved anymore.
@@ -143,7 +184,7 @@ echo "╔═══════════════════════�
 echo "║           Axon stack status                  ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Sessions:   manager | telegram | cli         ║"
-echo "║              curator | web                    ║"
+echo "║              curator | usage | web            ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Dashboard:  http://$TAILSCALE_IP:8501"
 echo "╚══════════════════════════════════════════════╝"

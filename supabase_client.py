@@ -19,6 +19,7 @@ import re
 import threading
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 import urllib.error
 import urllib.parse
 from typing import Optional
@@ -172,6 +173,52 @@ def _prompt_relevance_exists(path: str) -> bool | None:
 
 
 AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
+CONDOR_CHECK_COOLDOWN_SECONDS = 15 * 60
+CODEX_USAGE_CHECK_COOLDOWN_SECONDS = 60 * 60
+
+
+def latest_codex_weekly_usage() -> tuple[float, int] | None:
+    """Read the newest weekly-limit snapshot from local Codex JSONL files."""
+    sessions = Path.home() / ".codex" / "sessions"
+    try:
+        files = sorted(sessions.glob("**/*.jsonl"), key=lambda path: path.stat().st_mtime,
+                       reverse=True)[:8]
+    except OSError:
+        return None
+    newest = None
+    for path in files:
+        try:
+            lines = path.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = event.get("payload") or {}
+            limits = payload.get("rate_limits") or {}
+            primary = limits.get("primary") or {}
+            if payload.get("type") != "token_count" or primary.get("used_percent") is None:
+                continue
+            timestamp = event.get("timestamp") or ""
+            candidate = (timestamp, float(primary["used_percent"]), int(primary.get("resets_at") or 0))
+            if newest is None or candidate[0] > newest[0]:
+                newest = candidate
+            break
+    return (newest[1], newest[2]) if newest else None
+
+
+def _actor_elapsed(actor_row: dict, state_key: str = "last_advanced_at") -> Optional[float]:
+    value = (actor_row.get("state") or {}).get(state_key) if state_key != "last_advanced_at" else actor_row.get(state_key)
+    if not value:
+        return None
+    try:
+        last = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        last = last.replace(tzinfo=last.tzinfo or timezone.utc).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - last).total_seconds()
 
 
 def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
@@ -182,20 +229,29 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
         actor_id == "fitness-food-coach" or actor_id.endswith(":fitness-food-coach")
         or actor_type in {"fitness", "fitness-food-coach"}
     ) else actor_type
+    # These global rows belong to the ROG deployment. Injecting them on a work
+    # instance both wastes context and can incorrectly advance their shared state.
+    if kind in {"ailin-health-actor", "ailin-tick-actor"} and config.INSTANCE != "rog":
+        return False
+    if kind == "condor-cluster-actor":
+        elapsed = _actor_elapsed(actor_row, "last_check_at")
+        return elapsed is None or elapsed >= CONDOR_CHECK_COOLDOWN_SECONDS
+    if kind == "codex-usage-monitor":
+        # The standalone monitor advances this actor without spending a model
+        # turn. Prompt injection is only a fail-safe if that daemon has stopped
+        # advancing the row for two complete check periods.
+        elapsed = _actor_elapsed(actor_row, "last_check_at")
+        return elapsed is None or elapsed >= 2 * CODEX_USAGE_CHECK_COOLDOWN_SECONDS
+    if kind == "ailin-health-actor":
+        # The watchdog is checked periodically on its owning host, not on every chat.
+        elapsed = _actor_elapsed(actor_row)
+        return elapsed is None or elapsed >= AILIN_PULSE_COOLDOWN_SECONDS
     if kind == "ailin-tick-actor":
         # Not a data-freshness probe -- this actor is a pacing flag for Ailin's
         # separate standalone session (see ailin_session_manager pulses). Fires
         # on a wall-clock cooldown only, independent of any table content.
-        since = actor_row.get("last_advanced_at")
-        if not since:
-            return True
-        try:
-            last = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
-            last = last.replace(tzinfo=last.tzinfo or timezone.utc).astimezone(timezone.utc)
-        except ValueError:
-            return True
-        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-        return elapsed >= AILIN_PULSE_COOLDOWN_SECONDS
+        elapsed = _actor_elapsed(actor_row)
+        return elapsed is None or elapsed >= AILIN_PULSE_COOLDOWN_SECONDS
     if kind not in {"fitness-food-coach", "anton-state-tracker"}:
         return None
     since = actor_row.get("last_advanced_at")
@@ -709,7 +765,15 @@ def save_memory(type_: str, content: str, deadline: Optional[str] = None, priori
     _fire(_rest_insert, "memory", payload)
 
 
-def fetch_memory_context(limit: int = 50) -> str:
+def _memory_terms(text: str) -> set[str]:
+    """Cheap lexical terms for bounded memory retrieval (no extra model call)."""
+    return {
+        token for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())
+        if token not in {"the", "and", "that", "this", "with", "from", "for", "you", "your"}
+    }
+
+
+def fetch_memory_context(limit: int = 12, query: Optional[str] = None) -> str:
     """
     Fetch facts, preferences, and active goals from Supabase.
     Returns a formatted string ready to inject into the system prompt.
@@ -718,12 +782,14 @@ def fetch_memory_context(limit: int = 50) -> str:
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return ""
 
-    results = []
+    candidates = []
+    seen = set()
+    query_terms = _memory_terms(query or "")
     for type_filter, label in [("fact", "Facts"), ("preference", "Preferences"), ("goal", "Goals")]:
         url = (
             f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/memory"
-            f"?type=eq.{type_filter}&order=created_at.desc&limit={limit}"
-            f"&select=content,deadline"
+            f"?type=eq.{type_filter}&order=created_at.desc&limit=50"
+            f"&select=content,deadline,priority,created_at"
         )
         req = urllib.request.Request(
             url,
@@ -735,21 +801,43 @@ def fetch_memory_context(limit: int = 50) -> str:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 rows = json.loads(resp.read().decode())
-                if rows:
-                    items = []
-                    for r in rows:
-                        entry = r["content"]
-                        if r.get("deadline"):
-                            entry += f" (deadline: {r['deadline']})"
-                        items.append(f"- {entry}")
-                    results.append(f"{label}:\n" + "\n".join(items))
+                for recency, r in enumerate(rows):
+                    content = (r.get("content") or "").strip()
+                    normalized = re.sub(r"\s+", " ", content).casefold()
+                    if not content or normalized in seen:
+                        continue
+                    seen.add(normalized)
+                    overlap = len(query_terms & _memory_terms(content))
+                    # Preferences form the small always-on identity core. With a
+                    # query, relevance dominates while priority and recency break ties.
+                    core = 2 if not query and type_filter == "preference" else 0
+                    score = overlap * 100 + core * 20 + int(r.get("priority") or 0) * 5 - recency
+                    candidates.append((score, label, content, r.get("deadline")))
         except Exception as e:
             log.warning(f"Failed to fetch {type_filter} from Supabase: {e}")
 
-    if not results:
-        return ""
+    if query_terms:
+        relevant = [item for item in candidates if item[0] >= 100]
+        chosen = sorted(relevant, key=lambda item: item[0], reverse=True)[:limit]
+    else:
+        # Startup core only; project goals are retrieved on the relevant turn.
+        core = [item for item in candidates if item[1] != "Goals"]
+        chosen = sorted(core, key=lambda item: item[0], reverse=True)[:limit]
 
-    return "Long-term memory from past sessions:\n" + "\n\n".join(results)
+    if not chosen:
+        return ""
+    grouped = []
+    for label in ("Preferences", "Facts", "Goals"):
+        items = []
+        for _, item_label, content, deadline in chosen:
+            if item_label != label:
+                continue
+            entry = content + (f" (deadline: {deadline})" if deadline else "")
+            items.append(f"- {entry}")
+        if items:
+            grouped.append(f"{label}:\n" + "\n".join(items))
+    heading = "Relevant memory:" if query else "Persistent identity context:"
+    return heading + "\n" + "\n\n".join(grouped)
 
 
 def fetch_recent_messages(n: int = 20, channel: Optional[str] = None) -> str:

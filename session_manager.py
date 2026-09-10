@@ -50,7 +50,7 @@ import config
 import supabase_client
 from instance_plugin import TurnContext, _load_instance_plugin
 from actor_model.prompt_blocks import (
-    ActorBlockError, CODE_HASH_TURN_WINDOW, output_instructions,
+    ActorBlockError, ActorUpdate, CODE_HASH_TURN_WINDOW, output_instructions,
     parse_actor_updates, prompt_actor_rows, render_actor_inputs,
     strip_actor_blocks,
 )
@@ -425,7 +425,11 @@ class SessionManagerNode:
             return self.instance_plugin.context_for_turn(self._turn_context(item))
         if config.INSTANCE == "ailin":
             return supabase_client.fetch_ailin_semantic_context(item.text)
-        return supabase_client.fetch_relevant_dreams(item.text)
+        parts = [
+            supabase_client.fetch_memory_context(limit=8, query=item.text),
+            supabase_client.fetch_relevant_dreams(item.text),
+        ]
+        return "\n\n".join(part for part in parts if part)
 
     def _transform_instance_response(self, item: QueueItem, response_text: str) -> str:
         if self.instance_plugin:
@@ -510,7 +514,7 @@ class SessionManagerNode:
             skills_index = supabase_client.fetch_skills_index()
             if skills_index:
                 parts.append(f"\n{skills_index}")
-            memory_context = supabase_client.fetch_memory_context()
+            memory_context = supabase_client.fetch_memory_context(limit=12)
             if memory_context:
                 parts.append(f"\n{memory_context}")
             recent_msgs = supabase_client.fetch_recent_messages(n=20)
@@ -1140,6 +1144,25 @@ class SessionManagerNode:
                             supabase_client.prompt_actor_relevance_changed,
                             max_slots=config.MAX_ACTOR_SLOTS,
                         )
+                        # Ailin's pacing actor is a deterministic socket pulse;
+                        # it does not need model reasoning or prompt space.
+                        remaining_rows = []
+                        for row in actor_rows:
+                            if (row.get("actor_type") == "ailin-tick-actor"
+                                    and config.INSTANCE == "rog"
+                                    and self._pulse_ailin()):
+                                pulse_update = ActorUpdate(
+                                    actor_id=str(row.get("actor_id")),
+                                    status="running",
+                                    state={"last_pulse_note": "Pulsed standalone Ailin session.",
+                                           "first_activation_confirmed": True},
+                                    summary="Pulsed standalone Ailin session.",
+                                )
+                                if not supabase_client.save_prompt_actor_update(row, pulse_update):
+                                    remaining_rows.append(row)
+                            else:
+                                remaining_rows.append(row)
+                        actor_rows = remaining_rows
                         actor_context = render_actor_inputs(
                             actor_rows, self._actor_code_hash_turns,
                             current_turn=self._actor_prompt_turn,
@@ -1224,7 +1247,7 @@ class SessionManagerNode:
         "surfaces; most ticks won't need one. No reply needs to be shown to anyone."
     )
 
-    def _pulse_ailin(self):
+    def _pulse_ailin(self) -> bool:
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(1.0)
@@ -1237,8 +1260,10 @@ class SessionManagerNode:
             sock.sendall((payload + "\n").encode())
             sock.close()
             log.info("Pulsed Ailin's session (internal tick)")
+            return True
         except Exception as exc:
             log.warning("Ailin pulse skipped (her session may be down): %s", exc)
+            return False
 
     def _publish_response(self, item: QueueItem, response_text: str):
         actor_rows = item.prompt_actor_rows or []

@@ -96,3 +96,16 @@ INSTANCE: str = get("AXON_INSTANCE", "") or _socket.gethostname().lower()
 # existing conversational turn; it never starts a process, timer, or model call.
 ACTORS_ENABLED: bool = get("AXON_ACTORS", "0").lower() in ("1", "true", "yes")
 MAX_ACTOR_SLOTS: int = max(1, int(get("MAX_ACTOR_SLOTS", "4") or "4"))
+
+# Codex-backed engine (session_manager_codex.py). Distinct filenames from the
+# Claude-engine's SESSION_ID_FILE/LOCK_FILE so both engines can share one
+# RELAY_DIR without colliding if ever run side by side.
+CODEX_PATH: str = get("CODEX_PATH", "codex")
+# Keep Axon's persistent Codex thread well below the model's default
+# auto-compaction point (normally about 90% of the context window). The value
+# is passed as a process-local CLI override; it does not modify ~/.codex.
+CODEX_AUTO_COMPACT_TOKEN_LIMIT: int = max(
+    1, int(get("CODEX_AUTO_COMPACT_TOKEN_LIMIT", "100000") or "100000")
+)
+CODEX_THREAD_ID_FILE: str = f"{RELAY_DIR}/codex_thread_id"
+CODEX_LOCK_FILE: str = f"{RELAY_DIR}/session_manager_codex.lock"

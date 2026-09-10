@@ -11,9 +11,11 @@ echo "Stopping Axon processes..."
 # ── Kill the known long-running Axon processes by pattern ────────────────────
 PATTERNS=(
     "session_manager.py"
+    "session_manager_codex.py"
     "telegram_node.py"
     "cli_node.py"
     "curator.py"
+    "codex_usage_monitor.py"
     "streamlit run.*app.py"
     "ttyd.*browser_view"
 )
@@ -35,7 +37,7 @@ for pattern in "${PATTERNS[@]}"; do
 done
 
 # ── Kill the tmux sessions themselves ─────────────────────────────────────────
-SESSIONS=(manager telegram cli curator web browser_view)
+SESSIONS=(manager telegram cli curator usage web browser_view)
 
 for session in "${SESSIONS[@]}"; do
     if tmux has-session -t "$session" 2>/dev/null; then
