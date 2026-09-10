@@ -216,7 +216,16 @@ class SessionManagerCodexNode:
             pass
 
     def _spawn_codex(self) -> None:
-        cmd = [config.CODEX_PATH]
+        # Codex compacts in place, replacing older history with its native
+        # continuity summary. Override the default (~90% of the model context
+        # window) so this indefinitely-lived engine does not repeatedly pay
+        # for a near-full context. "total" includes the carried compaction
+        # prefix as well as history added since the previous compaction.
+        cmd = [
+            config.CODEX_PATH,
+            "-c", f"model_auto_compact_token_limit={config.CODEX_AUTO_COMPACT_TOKEN_LIMIT}",
+            "-c", 'model_auto_compact_token_limit_scope="total"',
+        ]
         if self.current_thread_id:
             cmd += ["resume", self.current_thread_id]
         else:
