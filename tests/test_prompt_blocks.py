@@ -47,6 +47,13 @@ def test_input_history_is_bounded_to_eight():
     assert "history" not in payload["state"]
 
 
+def test_actor_input_repeats_output_protocol_every_turn():
+    text = render_actor_inputs([row()])
+    assert "PROMPT-EMBEDDED ACTORS" in text
+    assert BEGIN_UPDATE in text
+    assert END_UPDATE in text
+
+
 def test_dirty_gate_skips_clean_low_priority_but_includes_dirty_new_and_dormant():
     now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
     clean = {**row("clean"), "last_advanced_at":"2026-08-14T11:00:00Z"}

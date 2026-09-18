@@ -93,7 +93,14 @@ is_session_healthy() {
     pgrep -f "$match_pattern" >/dev/null 2>&1
 }
 
-# ── Helper: ensure session exists and process is healthy, fixing only what's broken ──
+# ── Helper: launch a service without an interactive login shell ────────────
+#
+# Do not create an empty tmux shell and inject the command with send-keys.  On
+# this host interactive shell startup can take several seconds; sending during
+# that window races with .bashrc and can leave the command merely echoed or
+# queued.  It also lets unrelated shell-startup side effects interfere with
+# Axon.  Running bash directly makes the service command the pane's process and
+# deliberately skips all profile/rc files.
 ensure_session() {
     local session="$1"
     local match_pattern="$2"
@@ -105,27 +112,26 @@ ensure_session() {
     fi
 
     if tmux has-session -t "$session" 2>/dev/null; then
-        echo "Session '$session' exists but process not detected — restarting process in place..."
-        # Interrupt whatever's stuck (best-effort), clear the input line, then send the real command.
-        tmux send-keys -t "$session" C-c
-        sleep 0.3
-        tmux send-keys -t "$session" C-c
-        sleep 0.3
-        tmux send-keys -t "$session" C-u  # clear any partial input on the line
-        sleep 0.2
+        echo "Session '$session' exists but process not detected — recreating..."
+        tmux kill-session -t "$session"
     else
         echo "Session '$session' not found — creating..."
-        tmux new-session -d -s "$session" -x 220 -y 50
     fi
 
-    tmux send-keys -t "$session" "$cmd" Enter
-    sleep 1
+    tmux new-session -d -s "$session" -x 220 -y 50 \
+        /bin/bash --noprofile --norc -o pipefail -c "$cmd"
 
-    if is_session_healthy "$session" "$match_pattern"; then
-        echo "  -> '$session' started and confirmed healthy."
-    else
-        echo "  -> WARNING: '$session' started but process not yet detected (may still be initializing)."
-    fi
+    local attempt
+    for attempt in {1..30}; do
+        if is_session_healthy "$session" "$match_pattern"; then
+            echo "  -> '$session' started and confirmed healthy."
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "  -> WARNING: '$session' did not become healthy within 15 seconds."
+    return 1
 }
 
 # ── 1. manager — session manager / brain ─────────────────────────────────────

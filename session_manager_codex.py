@@ -4,10 +4,10 @@ from __future__ import annotations
 SessionManagerCodexNode — Codex-backed engine for Axon's relay v2 protocol.
 
 Like session_manager.py, this owns one long-lived interactive CLI process in a
-PTY.  Telegram prompts and cli_node.py keystrokes therefore enter the same
-Codex TUI, while display.sock mirrors the exact raw TUI output.  Completed
-Telegram responses are read from Codex's rollout JSONL, never scraped from the
-screen.
+PTY. Telegram prompts and cli_node.py keystrokes therefore enter the same
+Codex TUI. With actors enabled, display.sock carries only validated replies;
+otherwise it mirrors raw TUI output. Completed Telegram responses are read
+from Codex's rollout JSONL, never scraped from the screen.
 
 Confirmed live event shapes (codex 0.149.1, 2026-09-05 -- these differ from
 the on-disk ~/.codex/sessions/*.jsonl rollout-file format, which is a
@@ -22,7 +22,7 @@ Sockets (same protocol as session_manager.py -- consumers don't know or care
 which engine produced a response):
   user_input.sock      — NDJSON in:  {text, source, user_id, media_path?, request_id?}
   cli_input.sock       — raw keyboard bytes in: forwarded to the Codex PTY
-  display.sock         — raw Codex PTY bytes out
+  display.sock         — validated replies with actors; raw PTY otherwise
   claude_response.sock — NDJSON out: {text, source, user_id, request_id?}
   permission.sock      — listens but unused (codex runs with
                          --dangerously-bypass-approvals-and-sandbox, matching
@@ -43,6 +43,7 @@ import queue
 import json
 import logging
 import subprocess
+import shlex
 import time
 import pty
 import fcntl
@@ -57,7 +58,7 @@ import config
 import supabase_client
 from instance_plugin import TurnContext, _load_instance_plugin
 from actor_model.prompt_blocks import (
-    ActorBlockError, CODE_HASH_TURN_WINDOW, output_instructions,
+    ActorBlockError, CODE_HASH_TURN_WINDOW,
     parse_actor_updates, prompt_actor_rows, render_actor_inputs,
     strip_actor_blocks,
 )
@@ -117,6 +118,7 @@ class SessionManagerCodexNode:
         self.response_subs_lock = threading.Lock()
 
         self._running = True
+        self._remote_mode = bool(config.CODEX_REMOTE_HOST)
 
     # ------------------------------------------------------------------
     # Instance plugin glue (identical contract to session_manager.py)
@@ -165,8 +167,6 @@ class SessionManagerCodexNode:
         instance_context = self.instance_plugin.system_prompt_context()
         if instance_context:
             parts.append(f"\n{instance_context}")
-        if config.ACTORS_ENABLED:
-            parts.append("\n" + output_instructions())
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -262,6 +262,11 @@ class SessionManagerCodexNode:
                 break
             if not chunk:
                 break
+            # The TUI can redraw the previous answer after current_item is
+            # cleared. Never mirror raw TUI bytes when actors are enabled;
+            # _publish_clean_response sends the validated, stripped answer.
+            if config.ACTORS_ENABLED:
+                continue
             self._forward_display(chunk)
         if self._running:
             log.error("Codex TUI exited unexpectedly")
@@ -307,6 +312,9 @@ class SessionManagerCodexNode:
         return response_text, "Codex turn exceeded timeout"
 
     def _run_codex_turn(self, message_text: str) -> tuple[str, Optional[str]]:
+        if self._remote_mode:
+            return self._run_remote_codex_turn(message_text)
+
         path = self._rollout_path()
         if path is None and not self.current_thread_id:
             self._write_to_pty(
@@ -329,6 +337,83 @@ class SessionManagerCodexNode:
         time.sleep(3.0)
         self._write_to_pty(b"\r")
         return self._wait_for_rollout_response(path, initial_size)
+
+    def _remote_codex_command(self) -> list[str]:
+        common = [
+            "-c", f"model_auto_compact_token_limit={config.CODEX_AUTO_COMPACT_TOKEN_LIMIT}",
+            "-c", 'model_auto_compact_token_limit_scope="total"',
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+        ]
+        if self.current_thread_id:
+            remote_args = [
+                config.CODEX_REMOTE_PATH, "exec", "resume",
+                *common, self.current_thread_id, "-",
+            ]
+        else:
+            remote_args = [
+                config.CODEX_REMOTE_PATH, "exec", *common,
+                "-C", config.CODEX_REMOTE_PROJECT_DIR, "-",
+            ]
+        # OpenSSH concatenates arguments into a remote shell command. Passing a
+        # single shlex-joined string preserves every Codex option exactly; the
+        # user prompt itself stays out of the command line and travels on stdin.
+        return ["ssh", "-o", "BatchMode=yes", config.CODEX_REMOTE_HOST,
+                shlex.join(remote_args)]
+
+    def _run_remote_codex_turn(self, message_text: str) -> tuple[str, Optional[str]]:
+        cmd = self._remote_codex_command()
+        self._forward_display(b"\r\n[remote Codex turn started]\r\n")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=config.PROJECT_DIR,
+            )
+            with self.pty_lock:
+                self.codex_proc = proc
+            stdout, stderr = proc.communicate(input=message_text, timeout=_RESPONSE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return "", "Remote Codex turn exceeded timeout"
+        except Exception as exc:
+            return "", f"Remote Codex launch failed: {exc}"
+        finally:
+            with self.pty_lock:
+                self.codex_proc = None
+
+        response_text = ""
+        error_message: Optional[str] = None
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type")
+            if event_type == "thread.started":
+                thread_id = event.get("thread_id")
+                if thread_id and thread_id != self.current_thread_id:
+                    self.current_thread_id = thread_id
+                    self._save_thread_id(thread_id)
+            elif event_type == "item.completed":
+                item = event.get("item") or {}
+                if item.get("type") == "agent_message":
+                    response_text = item.get("text", "")
+            elif event_type == "turn.failed":
+                error = event.get("error") or {}
+                error_message = error.get("message") or "Remote Codex turn failed"
+
+        if proc.returncode != 0 and not error_message:
+            detail = stderr.strip().splitlines()
+            error_message = detail[-1] if detail else f"Remote Codex exited {proc.returncode}"
+        return response_text, error_message
 
     def _forward_display(self, data: bytes):
         with self.display_lock:
@@ -433,31 +518,115 @@ class SessionManagerCodexNode:
     # Response publishing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _actor_progress_summary(updates) -> str:
+        """Render all actor updates as compact, human-readable status lines."""
+        if not updates:
+            return ""
+
+        def compact(value, limit=220):
+            value = " ".join(str(value or "").split())
+            return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+        lines = ["Actors"]
+        for update in updates:
+            state = update.state
+            name = {"ailin-project-driver": "Ailin project driver",
+                    "condor-cluster-actor": "Condor cluster"}.get(
+                        update.actor_id, update.actor_id.replace("-", " ").capitalize())
+            status = compact(state.get("current_task_status") or update.status).replace("_", " ")
+            lines.append(f"{name} — {status}")
+            current = compact(state.get("current_task"), 120)
+            if current:
+                lines.append(f"  Now: {current}")
+            detail = compact(update.summary or state.get("last_verified_step"))
+            if detail:
+                lines.append(f"  {detail}")
+            requested = compact(state.get("requested_input"))
+            if state.get("current_task_status") == "waiting_for_human" and requested:
+                lines.append(f"  Needs from you: {requested}")
+        return "\n".join(lines)
+
+    def _repair_actor_response(
+        self, response_text: str, actor_rows: list[dict], expected_actor_ids: set[str],
+    ) -> tuple[str, Optional[str]]:
+        """Give the model one bounded chance to repair an invalid actor reply."""
+        actor_context = render_actor_inputs(actor_rows)
+        repair_prompt = (
+            "Your previous response was withheld because its required actor updates "
+            "were missing or invalid. Return the complete user-facing answer again, "
+            "then emit exactly one valid update for every expected actor. Do not "
+            "discuss this repair request in the user-facing answer.\n\n"
+            f"Expected actor IDs: {', '.join(sorted(expected_actor_ids))}\n\n"
+            f"{actor_context}\n\n"
+            "Previous response to repair:\n"
+            + response_text[:20_000]
+        )
+        return self._run_codex_turn(repair_prompt)
+
     def _publish_response(self, item: QueueItem, response_text: str):
         actor_rows = item.prompt_actor_rows or []
         expected_actor_ids = {str(row.get("actor_id")) for row in actor_rows}
+        updates = []
         if config.ACTORS_ENABLED and expected_actor_ids:
             try:
                 updates = parse_actor_updates(response_text, expected_actor_ids)
             except ActorBlockError as exc:
-                log.error("Prompt actor response rejected; no actor rows written: %s", exc)
-            else:
-                rows_by_id = {str(row.get("actor_id")): row for row in actor_rows}
-                failures = []
-                for update in updates:
-                    if not supabase_client.save_prompt_actor_update(rows_by_id[update.actor_id], update):
-                        failures.append(update.actor_id)
-                if failures:
-                    log.error("Prompt actor persistence incomplete; failed actor_ids=%s", failures)
-                else:
-                    log.info("Prompt actor response persisted: count=%d", len(updates))
+                log.warning("Prompt actor response rejected; attempting one repair: %s", exc)
+                response_text, repair_error = self._repair_actor_response(
+                    response_text, actor_rows, expected_actor_ids,
+                )
+                if repair_error:
+                    log.error("Prompt actor repair turn failed: %s", repair_error)
+                    self._publish_clean_response(
+                        item,
+                        "Axon withheld this reply because required actor updates failed "
+                        "validation after one repair attempt. Actor state was not changed; "
+                        "please retry.",
+                    )
+                    return
+                try:
+                    updates = parse_actor_updates(response_text, expected_actor_ids)
+                except ActorBlockError as repair_exc:
+                    log.error("Prompt actor repair rejected; reply withheld: %s", repair_exc)
+                    self._publish_clean_response(
+                        item,
+                        "Axon withheld this reply because required actor updates failed "
+                        "validation after one repair attempt. Actor state was not changed; "
+                        "please retry.",
+                    )
+                    return
+
+            rows_by_id = {str(row.get("actor_id")): row for row in actor_rows}
+            failures = []
+            for update in updates:
+                if not supabase_client.save_prompt_actor_update(rows_by_id[update.actor_id], update):
+                    failures.append(update.actor_id)
+            if failures:
+                log.error("Prompt actor persistence incomplete; reply withheld; actor_ids=%s", failures)
+                self._publish_clean_response(
+                    item,
+                    "Axon withheld this reply because required actor updates could not be "
+                    "persisted. Please retry.",
+                )
+                return
+            log.info("Prompt actor response persisted: count=%d", len(updates))
 
         response_without_actor_blocks = strip_actor_blocks(response_text)
+        actor_summary = self._actor_progress_summary(updates)
+        if actor_summary and actor_summary not in response_without_actor_blocks:
+            response_without_actor_blocks = (
+                response_without_actor_blocks.rstrip() + "\n\n" + actor_summary
+            )
         self._publish_clean_response(item, response_without_actor_blocks)
 
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         response_text = self._transform_instance_response(item, response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
+        # Remote mode has no TUI; actor-enabled local turns suppress the raw
+        # TUI stream for the same reason. Both display this validated text.
+        if (self._remote_mode or config.ACTORS_ENABLED) and clean_text:
+            self._forward_display(("\r\n" + clean_text + "\r\n").encode())
         supabase_client.save_message(
             role="assistant", content=clean_text, channel=config.SESSION_CHANNEL,
         )
@@ -552,6 +721,15 @@ class SessionManagerCodexNode:
                 break
 
     def _handle_cli_input(self, conn: socket.socket) -> None:
+        if self._remote_mode:
+            # Remote mode is turn-oriented (`codex exec`) rather than an
+            # interactive TUI. The web/CLI view still receives turn output,
+            # while user messages continue through user_input.sock/Telegram.
+            with conn:
+                while self._running and conn.recv(256):
+                    pass
+            log.info("CLINode keyboard disconnected (remote Codex mode)")
+            return
         buf = b""
         with conn:
             while self._running:
@@ -671,11 +849,16 @@ class SessionManagerCodexNode:
             log.info(f"Resuming thread: {self.current_thread_id[:8]}...")
             self._first_turn_done = True
 
-        self._spawn_codex()
+        if self._remote_mode:
+            log.info(
+                "Remote Codex mode: inference=%s project=%s; instance state remains local",
+                config.CODEX_REMOTE_HOST, config.CODEX_REMOTE_PROJECT_DIR,
+            )
+        else:
+            self._spawn_codex()
 
         import signal as signal_module
         threads = [
-            threading.Thread(target=self._pty_reader_thread, daemon=True),
             threading.Thread(target=self._queue_processor_thread, daemon=True),
             threading.Thread(target=self._user_input_server_thread, daemon=True),
             threading.Thread(target=self._cli_input_server_thread, daemon=True),
@@ -683,6 +866,8 @@ class SessionManagerCodexNode:
             threading.Thread(target=self._response_server_thread, daemon=True),
             threading.Thread(target=self._permission_server_thread, daemon=True),
         ]
+        if not self._remote_mode:
+            threads.insert(0, threading.Thread(target=self._pty_reader_thread, daemon=True))
         for t in threads:
             t.start()
 

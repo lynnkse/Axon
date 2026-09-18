@@ -101,6 +101,13 @@ MAX_ACTOR_SLOTS: int = max(1, int(get("MAX_ACTOR_SLOTS", "4") or "4"))
 # Claude-engine's SESSION_ID_FILE/LOCK_FILE so both engines can share one
 # RELAY_DIR without colliding if ever run side by side.
 CODEX_PATH: str = get("CODEX_PATH", "codex")
+# Optional inference host. When set, the instance keeps its relay, plugins,
+# memory retrieval, and response persistence local, but runs each Codex turn
+# through `codex exec --json` on this SSH host. This is useful for a machine
+# that should borrow another Axon host's authenticated Codex installation.
+CODEX_REMOTE_HOST: str = get("CODEX_REMOTE_HOST", "")
+CODEX_REMOTE_PATH: str = get("CODEX_REMOTE_PATH", CODEX_PATH)
+CODEX_REMOTE_PROJECT_DIR: str = get("CODEX_REMOTE_PROJECT_DIR", PROJECT_DIR)
 # Keep Axon's persistent Codex thread well below the model's default
 # auto-compaction point (normally about 90% of the context window). The value
 # is passed as a process-local CLI override; it does not modify ~/.codex.

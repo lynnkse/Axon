@@ -203,4 +203,10 @@ class CLINode:
 
 
 if __name__ == "__main__":
-    CLINode().run()
+    if config.ACTORS_ENABLED:
+        # Actor replies contain a machine-readable trailer. Use the managed
+        # request/response path so it is validated and stripped before display.
+        from codex_chat_cli import main as chat_main
+        chat_main()
+    else:
+        CLINode().run()

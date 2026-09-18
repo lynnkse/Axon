@@ -170,6 +170,8 @@ def render_actor_inputs(
     return (
         "[ACTIVE ACTORS — update every block during this same response]\n"
         + "\n".join(blocks)
+        + "\n\n"
+        + output_instructions()
     )
 
 

@@ -50,7 +50,7 @@ def main():
             continue
         msg_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         msg_sock.connect(config.USER_INPUT_SOCK)
-        payload = json.dumps({"text": text, "source": "telegram", "user_id": "anton"})
+        payload = json.dumps({"text": text, "source": "cli", "user_id": "anton"})
         msg_sock.sendall((payload + "\n").encode())
         msg_sock.close()
 

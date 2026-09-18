@@ -84,6 +84,46 @@ def _compact_state(state: dict, limit: int = 8) -> list[tuple[str, object]]:
     return scalars[:limit]
 
 
+def _actor_display_name(actor_id: str, actor_type: str) -> str:
+    """Return a short, human-facing actor name instead of an internal identifier."""
+    names = {
+        "ailin-project-driver": "Ailin Project Driver",
+        "ailin-health-actor": "Ailin Health Monitor",
+        "ailin-tick-actor": "Ailin Activity Pulse",
+        "condor-cluster-actor": "Condor Cluster Monitor",
+        "anton-state-tracker": "Anton State Tracker",
+        "fitness-food-coach": "Fitness & Food Coach",
+    }
+    return names.get(actor_id, actor_type.replace("-", " ").title())
+
+
+def _human_actor_status(disposition: str, state: dict) -> str:
+    """Translate stored actor states into language suitable for the dashboard."""
+    status = str((state or {}).get("current_task_status") or disposition or "unknown")
+    return {
+        "waiting_for_human": "Waiting for Anton",
+        "waiting_for_event": "Waiting for new information",
+        "ready_again": "Ready to continue",
+        "in_progress": "Working",
+        "running": "Running",
+        "blocked": "Blocked",
+        "completed": "Completed",
+        "dormant": "Inactive",
+    }.get(status, status.replace("_", " ").title())
+
+
+def _readable_event_summary(event: dict) -> str:
+    """Extract one readable sentence from an actor event without exposing payload JSON."""
+    payload = event.get("payload") or {}
+    if isinstance(payload, dict):
+        for key in ("summary", "message", "text", "outcome", "description", "reason"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    event_type = str(event.get("event_type") or "Actor update")
+    return event_type.replace("_", " ").replace("-", " ").title()
+
+
 # ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title=f"Axon Dashboard — {AXON_INSTANCE}", page_icon="⚡", layout="wide")
 
@@ -843,12 +883,15 @@ with tab_anton:
 
 # ── Tab: Actors ───────────────────────────────────────────────────────────────
 with tab_actors:
-    st.subheader("Actor Memory Blocks")
-    st.caption("Each block is one persistent actor thread, global/shared across instances. Open it to inspect current memory and its complete assigned event stream.")
+    st.subheader("Axon Updates")
+    st.caption(
+        "Persistent workers shared across Axon instances. Each card explains what the "
+        "worker is doing, what changed, and whether Anton needs to act."
+    )
     actors = _sb_get(
         "actor_state",
         "order=actor_id.asc"
-        "&select=actor_id,actor_type,disposition,revision,state,directory_projection,last_advanced_at,nice",
+        "&select=actor_id,actor_type,disposition,revision,state,directory_projection,last_advanced_at",
     )
     if actors:
         disposition_colors = {
@@ -861,32 +904,47 @@ with tab_actors:
             actor_type = actor.get("actor_type", "unknown")
             disposition = actor.get("disposition", "unknown")
             revision = actor.get("revision", 0)
-            nice = actor.get("nice", 0)
+            state = actor.get("state") or {}
             summary = (actor.get("directory_projection") or {}).get("summary", "")
-            label = f"▦  {actor_type}  ·  {actor_id}  ·  {disposition}  ·  rev {revision}  ·  nice {nice}"
-            with st.expander(label, expanded=False):
-                badges = (_badge(disposition, disposition_colors.get(disposition, "#6B7A8F"))
-                          + _badge(f"revision {revision}", "#7651A8")
-                          + _badge(actor_type, "#2E6F9E"))
+            display_name = _actor_display_name(actor_id, actor_type)
+            human_status = _human_actor_status(disposition, state)
+            status_key = str(state.get("current_task_status") or disposition)
+            label = f"{display_name}  ·  {human_status}"
+            with st.expander(label, expanded=(actor_id == "ailin-project-driver")):
+                badges = (_badge(human_status, disposition_colors.get(status_key, "#6B7A8F"))
+                          + _badge(f"Update {revision}", "#7651A8"))
                 st.markdown(
                     f'<div class="memory-block">{badges}'
-                    f'<div class="memory-id">{html.escape(actor_id)}</div>'
-                    f'<div>{html.escape(summary or "No directory summary")}</div>'
-                    f'<div class="memory-meta">Last advanced: '
+                    f'<div style="margin-top:8px;font-size:1.05rem;font-weight:650;">'
+                    f'{html.escape(display_name)}</div>'
+                    f'<div>{html.escape(summary or "No progress summary is available yet.")}</div>'
+                    f'<div class="memory-meta">Last updated: '
                     f'{html.escape(str(actor.get("last_advanced_at") or "never"))}</div></div>',
                     unsafe_allow_html=True,
                 )
 
-                state = actor.get("state") or {}
-                key_fields = _compact_state(state)
-                if key_fields:
-                    columns = st.columns(min(4, len(key_fields)))
-                    for index, (key, value) in enumerate(key_fields):
-                        display = f"{value:.3f}" if isinstance(value, float) else str(value)
-                        columns[index % len(columns)].metric(key.replace("_", " ").title(), display)
-
-                with st.expander("Current typed state (full JSON)", expanded=False):
-                    st.json(state)
+                if actor_id == "ailin-project-driver":
+                    if state.get("current_task"):
+                        st.markdown("**Current task**")
+                        st.write(state["current_task"])
+                    if state.get("last_verified_step"):
+                        st.markdown("**Latest verified progress**")
+                        st.success(state["last_verified_step"])
+                    if state.get("blocker"):
+                        st.markdown("**What is blocking progress**")
+                        st.warning(state["blocker"])
+                    if state.get("requested_input"):
+                        st.markdown("**Action needed from Anton**")
+                        st.error(state["requested_input"])
+                else:
+                    key_fields = _compact_state(state, limit=6)
+                    if key_fields:
+                        columns = st.columns(min(3, len(key_fields)))
+                        for index, (key, value) in enumerate(key_fields):
+                            display = f"{value:.3f}" if isinstance(value, float) else str(value)
+                            columns[index % len(columns)].metric(
+                                key.replace("_", " ").title(), display
+                            )
 
                 assignment_filter = urllib.parse.quote(
                     json.dumps([{"actor_id": actor_id}], separators=(",", ":")), safe=""
@@ -896,11 +954,21 @@ with tab_actors:
                     f"assignments=cs.{assignment_filter}&order=sequence.asc"
                     "&select=sequence,event_type,occurred_at,recorded_at,source_actor_id,source_kind,payload,provenance,assignments",
                 )
-                st.markdown(f"##### Event history · {len(history)} event{'s' if len(history) != 1 else ''}")
+                st.markdown(f"##### Recent updates · {len(history)}")
                 if history:
-                    st.dataframe(history, use_container_width=True, hide_index=True, height=340)
+                    readable_history = [
+                        {
+                            "When": event.get("occurred_at") or event.get("recorded_at") or "",
+                            "Update": _readable_event_summary(event),
+                            "Source": event.get("source_actor_id") or event.get("source_kind") or "Axon",
+                        }
+                        for event in reversed(history[-20:])
+                    ]
+                    st.dataframe(
+                        readable_history, width="stretch", hide_index=True, height=340
+                    )
                 else:
-                    st.caption("No assigned journal events yet.")
+                    st.caption("No update history is available yet.")
     else:
         st.info("No actor rows. Apply the migration and run the backfill first.")
 
@@ -1953,7 +2021,101 @@ with tab_ailin:
         "not the legacy Ollama/Leonid deployment). Source: ~/ailin/"
     )
 
-    ailin_design, ailin_schema = st.tabs(["Design & Status", "Schema Diagram"])
+    ailin_roadmap_tab, ailin_design, ailin_schema = st.tabs(
+        ["Roadmap", "Design & Status", "Schema Diagram"]
+    )
+
+    with ailin_roadmap_tab:
+        driver_rows = _sb_get(
+            "actor_state",
+            "actor_id=eq.ailin-project-driver&select=actor_id,revision,state,last_advanced_at",
+        )
+        roadmap_rows = _sb_get(
+            "ailin_roadmap",
+            "select=id,milestone,category,status,date_actual,date_planned,dev_hours,notes&order=id.asc",
+        )
+
+        driver = driver_rows[0] if driver_rows else {}
+        driver_state = driver.get("state") or {}
+        driver_status = driver_state.get("current_task_status", "not available")
+        status_color = "#D58B25" if driver_status == "waiting_for_human" else "#3E9B68"
+
+        st.markdown(
+            "### Project driver "
+            + _badge(driver_status.replace("_", " ").title(), status_color),
+            unsafe_allow_html=True,
+        )
+        if driver:
+            st.markdown(f"#### {driver_state.get('current_task', 'No current item')}")
+            if driver_state.get("last_verified_step"):
+                st.success(f"Latest progress: {driver_state['last_verified_step']}")
+            if driver_status == "waiting_for_human" and driver_state.get("requested_input"):
+                st.warning(f"What I need from you: {driver_state['requested_input']}")
+            elif driver_state.get("blocker"):
+                st.info(f"Current constraint: {driver_state['blocker']}")
+            st.caption(
+                f"Global actor revision {driver.get('revision', '—')} · "
+                f"last advanced {driver.get('last_advanced_at') or 'not recorded'}"
+            )
+        else:
+            st.warning("The global Ailin project-driver actor is not available.")
+
+        st.divider()
+        st.markdown("### Current ordered plan")
+        if roadmap_rows:
+            terminal_statuses = {"done", "complete", "completed", "legacy", "archived"}
+            current_rows = [
+                row for row in roadmap_rows
+                if int(row.get("id") or 0) >= 44
+                and str(row.get("status", "")).lower() not in terminal_statuses
+            ]
+            history_rows = [row for row in roadmap_rows if row not in current_rows]
+            done_count = sum(
+                str(row.get("status", "")).lower() in {"done", "complete", "completed"}
+                for row in roadmap_rows
+            )
+            active_count = 1 if current_rows else 0
+            planned_hours = sum(
+                float(row.get("dev_hours") or 0)
+                for row in current_rows
+            )
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("Items remaining", len(current_rows))
+            metric_cols[1].metric("Completed", done_count)
+            metric_cols[2].metric("Active", active_count)
+            metric_cols[3].metric("Remaining hours", f"{planned_hours:g}")
+
+            table_rows = []
+            for priority, row in enumerate(current_rows, start=1):
+                status = str(row.get("status") or "Unspecified")
+                category = str(row.get("category") or "Uncategorized")
+                table_rows.append({
+                    "Priority": priority,
+                    "Status": "Current" if priority == 1 else status.replace("_", " ").title(),
+                    "Item": row.get("milestone") or "",
+                    "Area": category,
+                    "Outcome / next step": row.get("notes") or "",
+                })
+            if table_rows:
+                st.dataframe(table_rows, width="stretch", hide_index=True)
+            else:
+                st.success("Every current roadmap item is complete.")
+
+            with st.expander(f"Completed and archived history ({len(history_rows)})"):
+                history_table = [{
+                    "#": row.get("id"),
+                    "Status": str(row.get("status") or "Unspecified").replace("_", " ").title(),
+                    "Item": row.get("milestone") or "",
+                    "Area": row.get("category") or "Uncategorized",
+                    "Completed": row.get("date_actual") or "",
+                } for row in history_rows]
+                st.dataframe(history_table, width="stretch", hide_index=True)
+            st.caption(
+                "Canonical sources: global `actor_state` row `ailin-project-driver` "
+                "and the Supabase `ailin_roadmap` table."
+            )
+        else:
+            st.info("No Ailin roadmap milestones were returned from Supabase.")
 
     with ailin_design:
         design_path = AILIN_DIR / "DESIGN.md"
