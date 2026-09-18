@@ -50,7 +50,8 @@ fi
 if (( CLEAR_CODEX_SESSION )); then
     AXON_RELAY_DIR="${RELAY_DIR:-$HOME/.claude-relay}"
     SAVED_CODEX_THREAD_ID="$AXON_RELAY_DIR/codex_thread_id"
-    rm -f -- "$SAVED_CODEX_THREAD_ID"
+    SAVED_CODEX_THREAD_REGISTRY="$AXON_RELAY_DIR/codex_thread_registry.json"
+    rm -f -- "$SAVED_CODEX_THREAD_ID" "$SAVED_CODEX_THREAD_REGISTRY"
     echo "Cleared saved Codex thread ID; starting a new Codex session."
 fi
 

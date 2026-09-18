@@ -115,4 +115,11 @@ CODEX_AUTO_COMPACT_TOKEN_LIMIT: int = max(
     1, int(get("CODEX_AUTO_COMPACT_TOKEN_LIMIT", "100000") or "100000")
 )
 CODEX_THREAD_ID_FILE: str = f"{RELAY_DIR}/codex_thread_id"
+CODEX_THREAD_REGISTRY_FILE: str = f"{RELAY_DIR}/codex_thread_registry.json"
+CODEX_ROUTE_AUDIT_FILE: str = f"{RELAY_DIR}/model_route_audit.jsonl"
+RETRIEVAL_AUDIT_FILE: str = f"{RELAY_DIR}/retrieval_audit.jsonl"
+CODEX_MAIN_DEFAULT_MODEL: str = get("CODEX_MAIN_DEFAULT_MODEL", "gpt-5.6-terra")
+CODEX_RESPONSE_TIMEOUT_SECONDS: int = max(
+    60, int(get("CODEX_RESPONSE_TIMEOUT_SECONDS", "1800") or "1800")
+)
 CODEX_LOCK_FILE: str = f"{RELAY_DIR}/session_manager_codex.lock"

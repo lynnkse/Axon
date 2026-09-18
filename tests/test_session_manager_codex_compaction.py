@@ -16,6 +16,7 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         self.node._rollouts_before_spawn = set()
         self.node._spawn_time = 0.0
         self.node._remote_mode = False
+        self.node._thread_registry = {}
 
     def _spawn_command(self, thread_id=None):
         self.node.current_thread_id = thread_id
@@ -32,12 +33,14 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         with patch.object(config, "CODEX_AUTO_COMPACT_TOKEN_LIMIT", 100000):
             cmd = self._spawn_command()
 
-        self.assertEqual(cmd[:5], [
+        self.assertEqual(cmd[:7], [
             config.CODEX_PATH,
+            "-m", config.CODEX_MAIN_DEFAULT_MODEL,
             "-c", "model_auto_compact_token_limit=100000",
             "-c", 'model_auto_compact_token_limit_scope="total"',
         ])
         self.assertIn("-C", cmd)
+        self.assertIn(config.CODEX_MAIN_DEFAULT_MODEL, cmd)
         self.assertIn(config.PROJECT_DIR, cmd)
         self.assertNotIn("resume", cmd)
 
@@ -45,8 +48,9 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         with patch.object(config, "CODEX_AUTO_COMPACT_TOKEN_LIMIT", 120000):
             cmd = self._spawn_command("thread-123")
 
-        self.assertEqual(cmd[:5], [
+        self.assertEqual(cmd[:7], [
             config.CODEX_PATH,
+            "-m", config.CODEX_MAIN_DEFAULT_MODEL,
             "-c", "model_auto_compact_token_limit=120000",
             "-c", 'model_auto_compact_token_limit_scope="total"',
         ])
@@ -67,7 +71,11 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         self.assertNotIn("resume", cmd[4])
 
     def test_remote_resumes_saved_thread(self):
+        self.node._remote_mode = True
         self.node.current_thread_id = "thread-123"
+        self.node._thread_registry = {
+            self.node._lane_key("main", config.CODEX_MAIN_DEFAULT_MODEL): "thread-123"
+        }
         with patch.object(config, "CODEX_REMOTE_HOST", "anton@host"), \
              patch.object(config, "CODEX_REMOTE_PATH", "/opt/codex"):
             cmd = self.node._remote_codex_command()

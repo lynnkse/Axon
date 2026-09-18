@@ -1,8 +1,4 @@
-"""Prompt-embedded actor blocks: bounded rendering, strict parsing, and validation.
-
-Actors advance only inside an existing conversational turn. There is no runtime,
-timer, poller, scheduler, worker, or additional model call in this module.
-"""
+"""Actor protocol blocks: bounded rendering, strict parsing, and validation."""
 from __future__ import annotations
 
 import json
@@ -20,10 +16,10 @@ END_INPUT = "<<<END_AXON_ACTOR_INPUT>>>"
 BEGIN_UPDATE = "<<<AXON_ACTOR_UPDATE>>>"
 END_UPDATE = "<<<END_AXON_ACTOR_UPDATE>>>"
 
-# Prompt-growth policy: retain the newest eight history entries, truncate any
+# Prompt-growth policy: retain the newest two history entries, truncate any
 # individual string to 2,000 characters, lists to 32 items, mappings to 64 keys,
 # and nesting to six levels. This bounds old history without fixing actor count.
-HISTORY_ENTRIES = 8
+HISTORY_ENTRIES = 2
 MAX_STRING_CHARS = 2_000
 MAX_LIST_ITEMS = 32
 MAX_DICT_KEYS = 64
@@ -123,9 +119,26 @@ def split_actor_state(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
     return code, data
 
 
+def _compact_dynamic_state(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Replace large stable collections with verifiable references.
+
+    Actor updates are patches, so omitted values remain canonical in storage.
+    """
+    compact, refs = {}, {}
+    for key, value in data.items():
+        if isinstance(value, (list, dict)) and len(value) > 8:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode()
+            refs[key] = {"items": len(value), "sha256": hashlib.sha256(encoded).hexdigest()[:16]}
+        else:
+            compact[key] = value
+    return compact, refs
+
+
 def render_actor_inputs(
     rows: list[dict], sent_code_hashes: dict[str, int] | None = None,
     current_turn: int = 0, code_hash_turn_window: int = CODE_HASH_TURN_WINDOW,
+    actor_only: bool = False,
 ) -> str:
     blocks = []
     seen: set[str] = set()
@@ -141,6 +154,7 @@ def render_actor_inputs(
         state = dict(row.get("state") or {})
         history = state.get("history", [])
         code, data = split_actor_state(state)
+        data, state_refs = _compact_dynamic_state(data)
         payload = {
             "actor_id": actor_id,
             "actor_type": row.get("actor_type"),
@@ -149,6 +163,11 @@ def render_actor_inputs(
             "state": _bounded(data),
             "recent_history": _bounded(list(history)[-HISTORY_ENTRIES:]),
         }
+        if state_refs:
+            payload["state_refs"] = state_refs
+        pending_conflicts = row.get("_pending_actor_conflicts") or []
+        if pending_conflicts:
+            payload["pending_conflicts"] = _bounded(pending_conflicts)
         if code:
             encoded_code = json.dumps(code, ensure_ascii=False, sort_keys=True,
                                       separators=(",", ":")).encode()
@@ -171,11 +190,25 @@ def render_actor_inputs(
         "[ACTIVE ACTORS — update every block during this same response]\n"
         + "\n".join(blocks)
         + "\n\n"
-        + output_instructions()
+        + output_instructions(actor_only=actor_only)
     )
 
 
-def output_instructions() -> str:
+def output_instructions(actor_only: bool = False) -> str:
+    if actor_only:
+        return f"""
+INTERNAL ACTOR PASS: Advance every supplied actor. Output exactly one update
+per input actor and no user-facing reply, using this delimiter and JSON shape:
+{BEGIN_UPDATE}
+{{"actor_id":"exact input actor_id","status":"running|finished|error","state":{{}},"summary":"short current summary","error_reason":null}}
+{END_UPDATE}
+The input state is a compact dynamic-data view. Returned state is a patch:
+omitted dynamic fields and state_refs remain canonical in storage. Preserve
+static role/code fields; do not echo them into state. Use running when work remains, finished only when done,
+and error only for a broken state with a nonempty error_reason. Preserve useful
+state and never omit an input actor. If pending_conflicts are present, reconcile
+their proposed updates with the current canonical state in this single pass.
+""".strip()
     return f"""
 PROMPT-EMBEDDED ACTORS: When the current user turn contains {BEGIN_INPUT} blocks,
 advance every supplied actor as part of this same response. After the normal reply,

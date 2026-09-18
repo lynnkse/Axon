@@ -40,11 +40,21 @@ def test_actor_slots_cap_and_prioritize_lower_nice():
         "lowest", "high", "normal-a", "normal-b"]
 
 
-def test_input_history_is_bounded_to_eight():
+def test_input_history_is_bounded_to_two():
     text=render_actor_inputs([row(history=[{"n":n} for n in range(12)])])
     payload=json.loads(text.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
-    assert [entry["n"] for entry in payload["recent_history"]] == list(range(4,12))
+    assert [entry["n"] for entry in payload["recent_history"]] == [10, 11]
     assert "history" not in payload["state"]
+
+
+def test_large_dynamic_collection_is_replaced_by_state_reference():
+    actor = row()
+    actor["state"]["roadmap_items"] = [f"item-{n}" for n in range(12)]
+    text = render_actor_inputs([actor])
+    payload = json.loads(text.split("<<<AXON_ACTOR_INPUT>>>\n",1)[1].split("\n<<<END",1)[0])
+    assert "roadmap_items" not in payload["state"]
+    assert payload["state_refs"]["roadmap_items"]["items"] == 12
+    assert len(payload["state_refs"]["roadmap_items"]["sha256"]) == 16
 
 
 def test_actor_input_repeats_output_protocol_every_turn():

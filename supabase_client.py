@@ -14,6 +14,7 @@ These tags are stripped from the response text before it reaches Telegram.
 """
 
 import json
+import hashlib
 import logging
 import re
 import threading
@@ -23,10 +24,25 @@ from pathlib import Path
 import urllib.error
 import urllib.parse
 from typing import Optional
+from dataclasses import dataclass
+from uuid import uuid4
 
 import config
 
 log = logging.getLogger(__name__)
+_audit_lock = threading.Lock()
+
+
+def _append_retrieval_audit(record: dict) -> None:
+    """Best-effort local diagnostics; never affect retrieval or the user turn."""
+    try:
+        path = Path(config.RETRIEVAL_AUDIT_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"at": datetime.now(timezone.utc).isoformat(), **record}
+        with _audit_lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        log.debug("Retrieval audit write failed: %s", exc)
 
 # ------------------------------------------------------------------
 # Tag patterns
@@ -154,6 +170,33 @@ def fetch_prompt_actor_states() -> list[dict] | None:
     return rows
 
 
+def attach_prompt_actor_conflicts(rows: list[dict]) -> list[dict]:
+    """Attach unseen conflict events only to actors selected for this turn."""
+    for row in rows:
+        actor_id = str(row.get("actor_id", ""))
+        state = row.get("state") or {}
+        last_sequence = int(state.get("_last_actor_conflict_sequence", 0) or 0)
+        assignment = urllib.parse.quote(
+            json.dumps([{"actor_id": actor_id}], separators=(",", ":")), safe="",
+        )
+        conflict_rows = _rest_get(
+            "events?event_type=eq.actor_update_conflict"
+            f"&sequence=gt.{last_sequence}&assignments=cs.{assignment}"
+            "&select=id,sequence,recorded_at,payload&order=sequence.asc&limit=200"
+        )
+        pending = []
+        for event in conflict_rows if isinstance(conflict_rows, list) else []:
+            pending.append({
+                "event_id": event.get("id"),
+                "sequence": event.get("sequence"),
+                "recorded_at": event.get("recorded_at"),
+                **(event.get("payload") or {}),
+            })
+        if pending:
+            row["_pending_actor_conflicts"] = pending
+    return rows
+
+
 def _prompt_relevance_exists(path: str) -> bool | None:
     """Strict, cheap existence probe: None means the gate must fail open."""
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
@@ -276,15 +319,68 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
     return False
 
 
-def save_prompt_actor_update(actor_row: dict, update) -> bool:
-    """Synchronously CAS-save one validated prompt-embedded actor update.
+@dataclass(frozen=True)
+class ActorSaveResult:
+    status: str
+    current_row: Optional[dict] = None
 
-    A false return is always logged by this function and must be treated as a
-    visible persistence failure by the caller. Actor history is capped at 50
-    lean transition records (status/summary/error only); the current living
-    state is stored once at the top level. Only the newest eight history
-    entries are injected into prompts.
-    """
+    def __bool__(self) -> bool:
+        return self.status == "saved"
+
+
+def _fetch_prompt_actor(actor_id: str) -> Optional[dict]:
+    encoded = urllib.parse.quote(str(actor_id))
+    rows = _rest_get(f"actor_state?actor_id=eq.{encoded}&select=*&limit=1")
+    return rows[0] if isinstance(rows, list) and len(rows) == 1 else None
+
+
+def _queue_actor_conflict(actor_row: dict, update, current_row: dict) -> bool:
+    """Persist a losing CAS proposal for reconciliation on the next actor turn."""
+    actor_id = str(actor_row.get("actor_id", ""))
+    event = {
+        "event_type": "actor_update_conflict",
+        "schema_version": 1,
+        "occurred_at": datetime.utcnow().isoformat() + "Z",
+        "source_actor_id": actor_id,
+        "source_instance": config.INSTANCE,
+        "source_kind": "prompt_actor",
+        "idempotency_key": (
+            f"actor-conflict:{actor_id}:{actor_row.get('revision', 0)}:{uuid4()}"
+        ),
+        "payload": {
+            "base_revision": int(actor_row.get("revision", 0) or 0),
+            "base_state": actor_row.get("state") or {},
+            "proposed_update": {
+                "status": update.status,
+                "state": update.state,
+                "summary": update.summary,
+                "error_reason": update.error_reason,
+            },
+            "canonical_revision": int(current_row.get("revision", 0) or 0),
+            "canonical_state": current_row.get("state") or {},
+        },
+        "provenance": {"reason": "actor_state_revision_conflict"},
+        "assignments": [{"actor_id": actor_id, "confidence": 1.0}],
+    }
+    req = urllib.request.Request(
+        f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/rpc/append_event",
+        data=json.dumps({"p_event": event}).encode(), method="POST", headers={
+            "apikey": config.SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            saved = json.loads(resp.read().decode() or "null")
+    except Exception as exc:
+        log.error("Failed to queue actor conflict for %s: %s", actor_id, exc,
+                  exc_info=True)
+        return False
+    return isinstance(saved, dict) and bool(saved.get("id"))
+
+
+def save_prompt_actor_update(actor_row: dict, update) -> ActorSaveResult:
+    """CAS-save once; queue a revision conflict for the next actor turn."""
     actor_id = actor_row.get("actor_id")
     revision = int(actor_row.get("revision", 0))
     old_state = dict(actor_row.get("state") or {})
@@ -295,14 +391,23 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
         "summary": update.summary,
         **({"error_reason": update.error_reason} if update.error_reason else {}),
     })
-    # Code is immutable prompt context for this transition. Preserve it from
-    # the row and persist only the model's dynamic data update beside it.
     from actor_model.prompt_blocks import CODE_STATE_KEYS
-    state = {key: old_state[key] for key in CODE_STATE_KEYS if key in old_state}
+    # Updates are patches. This lets the prompt omit large stable fields without
+    # deleting them and prevents a terse actor response from erasing live state.
+    state = {key: value for key, value in old_state.items() if key != "history"}
     state.update({key: value for key, value in update.state.items()
                   if key not in CODE_STATE_KEYS and key != "history"})
     state["history"] = history
-    disposition = {"running": "ready_again", "finished": "completed", "error": "blocked"}[update.status]
+    disposition = {
+        "running": "ready_again", "finished": "completed", "error": "blocked",
+    }[update.status]
+    pending = actor_row.get("_pending_actor_conflicts") or []
+    conflict_sequence = max(
+        [int(old_state.get("_last_actor_conflict_sequence", 0) or 0)]
+        + [int(event.get("sequence", 0) or 0) for event in pending]
+    )
+    if conflict_sequence:
+        state["_last_actor_conflict_sequence"] = conflict_sequence
     payload = {
         "state": state,
         "directory_projection": {"summary": update.summary, "status": update.status},
@@ -315,7 +420,7 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
     }
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         log.error("Actor update persistence unavailable for %s: Supabase is not configured", actor_id)
-        return False
+        return ActorSaveResult("storage_error")
     filters = (f"actor_id=eq.{urllib.parse.quote(str(actor_id))}"
                f"&revision=eq.{revision}&select=actor_id,revision")
     req = urllib.request.Request(
@@ -332,14 +437,21 @@ def save_prompt_actor_update(actor_row: dict, update) -> bool:
     except Exception as exc:
         log.error("Actor update persistence failed for %s at revision %s: %s",
                   actor_id, revision, exc, exc_info=True)
-        return False
+        return ActorSaveResult("storage_error")
     if len(rows) != 1 or rows[0].get("revision") != revision + 1:
         log.error("Actor update CAS failed for %s: expected revision %s, response=%r",
                   actor_id, revision, rows)
-        return False
+        current_row = _fetch_prompt_actor(str(actor_id))
+        if current_row is None:
+            return ActorSaveResult("storage_error")
+        if _queue_actor_conflict(actor_row, update, current_row):
+            log.info("Actor conflict queued for next turn: actor_id=%s base=%s current=%s",
+                     actor_id, revision, current_row.get("revision"))
+            return ActorSaveResult("conflict_queued", current_row)
+        return ActorSaveResult("storage_error", current_row)
     log.info("Prompt actor saved: actor_id=%s revision=%s status=%s",
              actor_id, revision + 1, update.status)
-    return True
+    return ActorSaveResult("saved")
 
 
 def _fire(fn, *args):
@@ -812,7 +924,7 @@ def fetch_memory_context(limit: int = 12, query: Optional[str] = None) -> str:
                     # query, relevance dominates while priority and recency break ties.
                     core = 2 if not query and type_filter == "preference" else 0
                     score = overlap * 100 + core * 20 + int(r.get("priority") or 0) * 5 - recency
-                    candidates.append((score, label, content, r.get("deadline")))
+                    candidates.append((score, label, content, r.get("deadline"), overlap))
         except Exception as e:
             log.warning(f"Failed to fetch {type_filter} from Supabase: {e}")
 
@@ -824,12 +936,23 @@ def fetch_memory_context(limit: int = 12, query: Optional[str] = None) -> str:
         core = [item for item in candidates if item[1] != "Goals"]
         chosen = sorted(core, key=lambda item: item[0], reverse=True)[:limit]
 
+    shadow = [item for item in sorted(candidates, key=lambda item: item[0], reverse=True)
+              if item[4] >= 2][:min(limit, 5)] if query_terms else chosen[:min(limit, 5)]
+    _append_retrieval_audit({
+        "kind": "memory",
+        "query_sha256": hashlib.sha256((query or "").encode()).hexdigest()[:16],
+        "query_terms": sorted(query_terms)[:40],
+        "actual": [{"label": x[1], "score": x[0], "overlap": x[4], "preview": x[2][:180]}
+                   for x in chosen],
+        "shadow_strict": [{"label": x[1], "score": x[0], "overlap": x[4], "preview": x[2][:180]}
+                          for x in shadow],
+    })
     if not chosen:
         return ""
     grouped = []
     for label in ("Preferences", "Facts", "Goals"):
         items = []
-        for _, item_label, content, deadline in chosen:
+        for _, item_label, content, deadline, _overlap in chosen:
             if item_label != label:
                 continue
             entry = content + (f" (deadline: {deadline})" if deadline else "")
@@ -1179,7 +1302,13 @@ def fetch_relevant_rules(message_text: str) -> str:
         if any(kw in msg_lower for kw in keywords):
             matched.append(rule["content"])
     if not matched:
+        _append_retrieval_audit({"kind": "rules", "message_sha256": hashlib.sha256(message_text.encode()).hexdigest()[:16], "matched": []})
         return ""
+    _append_retrieval_audit({
+        "kind": "rules",
+        "message_sha256": hashlib.sha256(message_text.encode()).hexdigest()[:16],
+        "matched": [entry.split(":", 1)[0].removeprefix("- ") for entry in matched],
+    })
     return "[Rules to follow for this message]\n" + "\n".join(f"- {r}" for r in matched) + "\n\n"
 
 
@@ -1223,7 +1352,17 @@ def fetch_relevant_rule_names(message_text: str) -> str:
         matched.append(entry)
 
     if not matched:
+        _append_retrieval_audit({
+            "kind": "rule_anchors",
+            "message_sha256": hashlib.sha256(message_text.encode()).hexdigest()[:16],
+            "matched": [],
+        })
         return ""
+    _append_retrieval_audit({
+        "kind": "rule_anchors",
+        "message_sha256": hashlib.sha256(message_text.encode()).hexdigest()[:16],
+        "matched": [entry.split(":", 1)[0].removeprefix("- ") for entry in matched],
+    })
     return (
         "[Rules to follow for this message — query the Supabase rules table WHERE name = '<rule_name>' to load full protocol before acting]\n"
         + "\n".join(matched)

@@ -4,7 +4,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 import config
-from actor_model.prompt_blocks import BEGIN_UPDATE, END_UPDATE
+import supabase_client
+from actor_model.prompt_blocks import (
+    ActorUpdate,
+    BEGIN_UPDATE,
+    END_UPDATE,
+    render_actor_inputs,
+)
 from session_manager_codex import QueueItem, SessionManagerCodexNode
 
 
@@ -71,18 +77,17 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.assertIn("Needs from you: Authorize the next step.", published)
         self.assertNotIn(BEGIN_UPDATE, published)
 
-    def test_missing_update_gets_one_repair_attempt(self):
-        self.node._run_codex_turn = Mock(return_value=(actor_response("Repaired reply"), None))
+    def test_missing_update_is_delivered_without_a_retry(self):
+        self.node._run_codex_turn = Mock()
         with patch.object(config, "ACTORS_ENABLED", True), \
-             patch("session_manager_codex.supabase_client.save_prompt_actor_update",
-                   return_value=True):
+             patch("session_manager_codex.supabase_client.save_prompt_actor_update") as save:
             self.node._publish_response(self.item, "Reply without actor protocol")
 
-        self.node._run_codex_turn.assert_called_once()
+        self.node._run_codex_turn.assert_not_called()
+        save.assert_not_called()
         published = self.node._publish_clean_response.call_args.args[1]
-        self.assertIn("Repaired reply", published)
-        self.assertIn("Ailin project driver — waiting for human", published)
-        self.assertIn("Needs from you:", published)
+        self.assertIn("Reply without actor protocol", published)
+        self.assertIn("failed validation", published)
 
     def test_in_progress_update_is_visible_without_a_fake_blocker(self):
         response = actor_response(requested_input="None")
@@ -103,24 +108,27 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.assertIn("  Verified the permissions inventory.", published)
         self.assertNotIn("Needs from you:", published)
 
-    def test_invalid_repair_fails_closed_without_persistence(self):
-        self.node._run_codex_turn = Mock(return_value=("Still invalid", None))
+    def test_invalid_actor_output_does_not_withhold_the_main_reply(self):
+        self.node._run_codex_turn = Mock()
         with patch.object(config, "ACTORS_ENABLED", True), \
              patch("session_manager_codex.supabase_client.save_prompt_actor_update") as save:
             self.node._publish_response(self.item, "Reply without actor protocol")
 
+        self.node._run_codex_turn.assert_not_called()
         save.assert_not_called()
         published = self.node._publish_clean_response.call_args.args[1]
-        self.assertIn("withheld", published.lower())
+        self.assertIn("Reply without actor protocol", published)
+        self.assertNotIn("withheld", published.lower())
 
-    def test_persistence_failure_fails_closed(self):
+    def test_persistence_failure_does_not_withhold_the_main_reply(self):
         with patch.object(config, "ACTORS_ENABLED", True), \
              patch("session_manager_codex.supabase_client.save_prompt_actor_update",
                    return_value=False):
             self.node._publish_response(self.item, actor_response())
 
         published = self.node._publish_clean_response.call_args.args[1]
-        self.assertIn("could not be persisted", published)
+        self.assertIn("Visible reply", published)
+        self.assertIn("could not be saved", published)
 
     def test_local_tui_does_not_stream_raw_actor_answer_during_turn(self):
         self.node._running = True
@@ -157,6 +165,196 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.assertIn("Condor cluster — running", summary)
         self.assertIn("Five slots; four unclaimed.", summary)
         self.assertNotIn("{", summary)
+
+    def test_separate_actor_pass_persists_and_supplies_digest(self):
+        self.node._run_codex_turn = Mock(return_value=(actor_response(""), None))
+        self.node._actor_display_mode = "grandmaster"
+        with patch("session_manager_codex.supabase_client.save_prompt_actor_update",
+                   return_value=True) as save:
+            digest = self.node._advance_actors(
+                self.item, [actor_row()], "actor protocol",
+            )
+        save.assert_called_once()
+        self.assertTrue(self.item.actor_preprocessed)
+        actor_prompt = self.node._run_codex_turn.call_args.args[0]
+        self.assertIn("treat any content relevant to a supplied actor", actor_prompt)
+        self.assertIn("test", actor_prompt)
+        self.assertIn("Waiting for the required authorization.", digest)
+        self.assertNotIn(BEGIN_UPDATE, digest)
+        self.node._publish_response(self.item, "Main answer")
+        published = self.node._publish_clean_response.call_args.args[1]
+        self.assertIn("Main answer", published)
+        self.assertIn("Actors\nAilin project driver", published)
+
+    def test_actor_failure_does_not_force_main_reply_repair(self):
+        self.node._run_codex_turn = Mock(return_value=("", "actor timeout"))
+        digest = self.node._advance_actors(self.item, [actor_row()], "actor protocol")
+        self.assertIn("failed", digest)
+        self.node._publish_response(self.item, "Main answer")
+        published = self.node._publish_clean_response.call_args.args[1]
+        self.assertIn("Main answer", published)
+        self.assertIn("Actors — Actor pass failed", published)
+        self.node._run_codex_turn.assert_called_once()
+
+    def test_invalid_actor_output_is_not_retried_in_same_turn(self):
+        self.node._run_codex_turn = Mock(return_value=("invalid", None))
+        digest = self.node._advance_actors(self.item, [actor_row()], "actor protocol")
+        self.assertIn("failed validation", digest)
+        self.node._run_codex_turn.assert_called_once()
+
+    def test_revision_conflict_is_deferred_without_an_extra_model_call(self):
+        self.node._run_codex_turn = Mock(return_value=(actor_response(""), None))
+        result = supabase_client.ActorSaveResult("conflict_queued", {"revision": 8})
+        with patch("session_manager_codex.supabase_client.save_prompt_actor_update",
+                   return_value=result):
+            digest = self.node._advance_actors(
+                self.item, [actor_row()], "actor protocol",
+            )
+        self.node._run_codex_turn.assert_called_once()
+        self.assertIn("next user turn", digest)
+        self.assertEqual(self.item.actor_deferred, [ACTOR_ID])
+        self.assertEqual(self.item.actor_updates, [])
+        self.node._publish_response(self.item, "Main answer")
+        published = self.node._publish_clean_response.call_args.args[1]
+        self.assertIn("Main answer", published)
+        self.assertIn("deferred to next turn", published)
+
+    def test_pending_conflict_is_supplied_to_the_next_actor_pass(self):
+        row = actor_row()
+        row["_pending_actor_conflicts"] = [{
+            "sequence": 12,
+            "base_revision": 7,
+            "base_state": {"current_task": "Old task"},
+            "proposed_update": {
+                "status": "running",
+                "state": {"current_task": "Proposed task"},
+                "summary": "Proposed progress.",
+                "error_reason": None,
+            },
+            "canonical_revision": 8,
+            "canonical_state": {"current_task": "Concurrent task"},
+        }]
+
+        rendered = render_actor_inputs([row])
+
+        self.assertIn('"pending_conflicts"', rendered)
+        self.assertIn('"Proposed task"', rendered)
+        self.assertIn('"Concurrent task"', rendered)
+
+    def test_conflict_events_are_attached_after_last_processed_sequence(self):
+        row = actor_row()
+        row["state"]["_last_actor_conflict_sequence"] = 7
+        event = {
+            "id": "event-12",
+            "sequence": 12,
+            "recorded_at": "2026-09-18T07:00:00Z",
+            "payload": {
+                "base_revision": 7,
+                "proposed_update": {"summary": "Losing proposal"},
+                "canonical_revision": 8,
+            },
+        }
+        with patch("supabase_client._rest_get", return_value=[event]) as fetch:
+            result = supabase_client.attach_prompt_actor_conflicts([row])
+
+        self.assertEqual(result[0]["_pending_actor_conflicts"][0]["sequence"], 12)
+        query = fetch.call_args.args[0]
+        self.assertIn("event_type=eq.actor_update_conflict", query)
+        self.assertIn("sequence=gt.7", query)
+        self.assertIn("assignments=cs.", query)
+
+    def test_successful_merge_advances_only_the_conflict_event_cursor(self):
+        row = actor_row()
+        row["last_event_sequence"] = 5
+        row["state"]["_last_actor_conflict_sequence"] = 7
+        row["_pending_actor_conflicts"] = [{"sequence": 12}]
+        update = ActorUpdate(
+            ACTOR_ID, "running", {"current_task": "Merged task"},
+            "Merged concurrent progress.", None,
+        )
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps([{"actor_id": ACTOR_ID, "revision": 8}]).encode()
+
+        with patch.object(config, "SUPABASE_URL", "https://example.supabase.co"), \
+             patch.object(config, "SUPABASE_SERVICE_ROLE_KEY", "test-key"), \
+             patch("supabase_client.urllib.request.urlopen", return_value=Response()) as send:
+            result = supabase_client.save_prompt_actor_update(row, update)
+
+        request = send.call_args.args[0]
+        payload = json.loads(request.data.decode())
+        self.assertEqual(result.status, "saved")
+        self.assertNotIn("last_event_sequence", payload)
+        self.assertEqual(payload["state"]["_last_actor_conflict_sequence"], 12)
+        self.assertEqual(payload["state"]["current_task"], "Merged task")
+
+    def test_queued_conflict_preserves_base_proposal_and_canonical_state(self):
+        row = actor_row()
+        update = ActorUpdate(
+            ACTOR_ID, "running", {"current_task": "Proposed task"},
+            "Proposed progress.", None,
+        )
+        current = {
+            "actor_id": ACTOR_ID,
+            "revision": 8,
+            "state": {"current_task": "Concurrent task"},
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"id": "conflict-event"}).encode()
+
+        with patch.object(config, "SUPABASE_URL", "https://example.supabase.co"), \
+             patch.object(config, "SUPABASE_SERVICE_ROLE_KEY", "test-key"), \
+             patch("supabase_client.urllib.request.urlopen", return_value=Response()) as send:
+            saved = supabase_client._queue_actor_conflict(row, update, current)
+
+        event = json.loads(send.call_args.args[0].data.decode())["p_event"]
+        self.assertTrue(saved)
+        self.assertEqual(event["payload"]["base_revision"], 7)
+        self.assertEqual(
+            event["payload"]["proposed_update"]["state"]["current_task"],
+            "Proposed task",
+        )
+        self.assertEqual(event["payload"]["canonical_revision"], 8)
+        self.assertEqual(
+            event["payload"]["canonical_state"]["current_task"],
+            "Concurrent task",
+        )
+        self.assertEqual(event["assignments"][0]["actor_id"], ACTOR_ID)
+
+    def test_focus_mode_only_shows_actionable_actor_updates(self):
+        from actor_model.prompt_blocks import ActorUpdate
+        self.item.actor_preprocessed = True
+        self.item.actor_updates = [
+            ActorUpdate("quiet-actor", "running", {"current_task_status": "in_progress"},
+                        "Routine check.", None),
+            ActorUpdate(ACTOR_ID, "running", {"current_task_status": "waiting_for_human",
+                                               "requested_input": "Choose schema grants."},
+                        "Blocked on a choice.", None),
+        ]
+        self.node._select_actor_display_mode("Let's work in focus mode")
+        self.node._publish_response(self.item, "Main answer")
+        published = self.node._publish_clean_response.call_args.args[1]
+        self.assertNotIn("Routine check.", published)
+        self.assertIn("Choose schema grants.", published)
+        self.node._select_actor_display_mode("Grandmaster mode")
+        self.assertEqual(self.node._actor_display_mode, "grandmaster")
 
 
 if __name__ == "__main__":
