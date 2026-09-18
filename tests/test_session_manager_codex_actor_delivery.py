@@ -55,6 +55,8 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
     def setUp(self):
         self.node = SessionManagerCodexNode.__new__(SessionManagerCodexNode)
         self.node._publish_clean_response = Mock()
+        self.node._actor_display_mode = "auto"
+        self.node._actor_engagement = {}
         self.item = QueueItem(
             text="test",
             source="telegram",
@@ -338,7 +340,7 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(event["assignments"][0]["actor_id"], ACTOR_ID)
 
-    def test_focus_mode_only_shows_actionable_actor_updates(self):
+    def test_focus_mode_shows_every_actor_as_one_line(self):
         from actor_model.prompt_blocks import ActorUpdate
         self.item.actor_preprocessed = True
         self.item.actor_updates = [
@@ -351,10 +353,38 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.node._select_actor_display_mode("Let's work in focus mode")
         self.node._publish_response(self.item, "Main answer")
         published = self.node._publish_clean_response.call_args.args[1]
-        self.assertNotIn("Routine check.", published)
-        self.assertIn("Choose schema grants.", published)
+        self.assertIn("Quiet actor — in progress: Routine check.", published)
+        self.assertIn("Ailin project driver — waiting for human: Blocked on a choice.", published)
+        self.assertNotIn("Needs from you:", published)
         self.node._select_actor_display_mode("Grandmaster mode")
         self.assertEqual(self.node._actor_display_mode, "grandmaster")
+
+    def test_auto_mode_cools_idle_actors_and_warms_named_actor(self):
+        rows = [
+            actor_row(),
+            {"actor_id": "condor-cluster-actor", "actor_type": "condor-cluster-actor"},
+        ]
+        levels = self.node._update_actor_engagement("Let's inspect the Condor queue", rows)
+        self.assertEqual(levels["condor-cluster-actor"], "detailed")
+        self.assertEqual(levels[ACTOR_ID], "compact")
+
+        levels = self.node._update_actor_engagement("Continue writing the paper", rows)
+        self.assertEqual(levels["condor-cluster-actor"], "warm")
+        levels = self.node._update_actor_engagement("Continue writing", rows)
+        self.assertEqual(levels["condor-cluster-actor"], "warm")
+        levels = self.node._update_actor_engagement("Continue", rows)
+        self.assertEqual(levels["condor-cluster-actor"], "compact")
+
+    def test_generic_actor_discussion_warms_all_and_auto_command_clears_override(self):
+        rows = [actor_row(), {"actor_id": "condor-cluster-actor",
+                              "actor_type": "condor-cluster-actor"}]
+        levels = self.node._update_actor_engagement("Show me more actor updates", rows)
+        self.assertEqual(set(levels.values()), {"warm"})
+        levels = self.node._update_actor_engagement("Keep discussing actors", rows)
+        self.assertEqual(set(levels.values()), {"detailed"})
+        self.node._actor_display_mode = "focus"
+        self.node._select_actor_display_mode("Return to automatic actor mode")
+        self.assertEqual(self.node._actor_display_mode, "auto")
 
 
 if __name__ == "__main__":

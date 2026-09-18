@@ -36,6 +36,7 @@ engine must supply a plugin via AXON_EXTENSIONS_PATH.
 """
 
 import os
+import re
 import sys
 import socket
 import threading
@@ -97,6 +98,7 @@ class QueueItem:
     actor_preprocessed: bool = False
     actor_failure: Optional[str] = None
     actor_deferred: Optional[list[str]] = None
+    actor_display_levels: Optional[dict[str, str]] = None
 
 
 class SessionManagerCodexNode:
@@ -123,7 +125,8 @@ class SessionManagerCodexNode:
         self._rollouts_before_spawn: set[str] = set()
         self._actor_prompt_turn = 0
         self._actor_code_hash_turns: dict[str, int] = {}
-        self._actor_display_mode = "grandmaster"
+        self._actor_display_mode = "auto"
+        self._actor_engagement: dict[str, int] = {}
         self._thread_registry: dict[str, str] = {}
         self._deferred_main_model: Optional[str] = None
         self._last_main_model: Optional[str] = None
@@ -607,6 +610,9 @@ class SessionManagerCodexNode:
             item.prompt_actor_rows = actor_rows
             if is_real_user_prompt:
                 self._select_actor_display_mode(item.text)
+                item.actor_display_levels = self._update_actor_engagement(
+                    item.text, actor_rows,
+                )
             used_percent = self._weekly_usage_percent()
             actor_digest = ""
             if actor_rows:
@@ -666,7 +672,7 @@ class SessionManagerCodexNode:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _actor_progress_summary(updates) -> str:
+    def _actor_progress_summary(updates, display_levels=None) -> str:
         """Render all actor updates as compact, human-readable status lines."""
         if not updates:
             return ""
@@ -682,13 +688,20 @@ class SessionManagerCodexNode:
                     "condor-cluster-actor": "Condor cluster"}.get(
                         update.actor_id, update.actor_id.replace("-", " ").capitalize())
             status = compact(state.get("current_task_status") or update.status).replace("_", " ")
+            level = (display_levels or {}).get(update.actor_id, "detailed")
+            detail = compact(update.summary or state.get("last_verified_step"))
+            if level == "compact":
+                suffix = f": {detail}" if detail else ""
+                lines.append(f"{name} — {status}{suffix}")
+                continue
             lines.append(f"{name} — {status}")
             current = compact(state.get("current_task"), 120)
             if current:
                 lines.append(f"  Now: {current}")
-            detail = compact(update.summary or state.get("last_verified_step"))
             if detail:
                 lines.append(f"  {detail}")
+            if level == "warm":
+                continue
             requested = compact(state.get("requested_input"))
             if state.get("current_task_status") == "waiting_for_human" and requested:
                 lines.append(f"  Needs from you: {requested}")
@@ -702,13 +715,8 @@ class SessionManagerCodexNode:
         if item.actor_preprocessed:
             clean_response = strip_actor_blocks(response_text)
             updates = item.actor_updates or []
-            mode = getattr(self, "_actor_display_mode", "grandmaster")
-            if mode == "focus":
-                updates = [update for update in updates if
-                           update.status == "error" or
-                           update.state.get("current_task_status") == "waiting_for_human" or
-                           update.state.get("needs_model_escalation")]
-            summary = self._actor_progress_summary(updates)
+            levels = self._actor_display_levels(updates, item.actor_display_levels)
+            summary = self._actor_progress_summary(updates, levels)
             if summary and summary not in clean_response:
                 clean_response = clean_response.rstrip() + "\n\n" + summary
             if item.actor_failure:
@@ -761,7 +769,8 @@ class SessionManagerCodexNode:
             log.info("Prompt actor response persisted: count=%d", len(updates))
 
         response_without_actor_blocks = strip_actor_blocks(response_text)
-        actor_summary = self._actor_progress_summary(saved_updates)
+        levels = self._actor_display_levels(saved_updates, item.actor_display_levels)
+        actor_summary = self._actor_progress_summary(saved_updates, levels)
         if actor_summary and actor_summary not in response_without_actor_blocks:
             response_without_actor_blocks = (
                 response_without_actor_blocks.rstrip() + "\n\n" + actor_summary
@@ -1073,6 +1082,55 @@ class SessionManagerCodexNode:
             self._actor_display_mode = "focus"
         elif "grandmaster mode" in lowered or "grassmaster mode" in lowered:
             self._actor_display_mode = "grandmaster"
+        elif "automatic actor mode" in lowered or "auto actor mode" in lowered:
+            self._actor_display_mode = "auto"
+
+    def _update_actor_engagement(self, text: str, rows: list[dict]) -> dict[str, str]:
+        """Decay idle actors and warm actors named or discussed by the user."""
+        engagement = getattr(self, "_actor_engagement", {})
+        lowered = text.lower()
+        generic_actor_turn = any(phrase in lowered for phrase in (
+            "actors", "actor updates", "actor space", "actor input",
+        ))
+        ignored = {"actor", "project", "driver"}
+        levels = {}
+        active_ids = {str(row.get("actor_id")) for row in rows}
+        for actor_id in active_ids:
+            score = max(0, int(engagement.get(actor_id, 0)) - 1)
+            row = next(
+                row for row in rows if str(row.get("actor_id")) == actor_id
+            )
+            actor_type = str(row.get("actor_type", ""))
+            tokens = {
+                token for token in (actor_id + " " + actor_type).lower().replace("-", " ").split()
+                if token not in ignored and len(token) > 2
+            }
+            directly_named = any(
+                re.search(rf"\b{re.escape(token)}\b", lowered)
+                for token in tokens
+            )
+            if generic_actor_turn:
+                score = min(4, score + 2)
+            if directly_named:
+                score = min(4, score + 3)
+            engagement[actor_id] = score
+            levels[actor_id] = "detailed" if score >= 3 else "warm" if score else "compact"
+        self._actor_engagement = {
+            actor_id: score for actor_id, score in engagement.items()
+            if actor_id in active_ids and score > 0
+        }
+        return levels
+
+    def _actor_display_levels(self, updates, automatic_levels=None) -> dict[str, str]:
+        mode = getattr(self, "_actor_display_mode", "auto")
+        if mode == "focus":
+            return {update.actor_id: "compact" for update in updates}
+        if mode == "grandmaster":
+            return {update.actor_id: "detailed" for update in updates}
+        # Older queued items and direct callers have no turn-time heat snapshot.
+        # Preserve their established detailed rendering rather than silently
+        # treating missing data as evidence that an actor is cold.
+        return automatic_levels or {update.actor_id: "detailed" for update in updates}
 
     def _advance_actors(
         self, item: QueueItem, rows: list[dict], context: str,
