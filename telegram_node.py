@@ -382,7 +382,10 @@ async def _typing_keepalive(
             pass
 
 
-_RESPONSE_TIMEOUT = 720.0  # 12 min (session_manager times out at 10 min)
+# The manager owns the actual hard deadline. Telegram waits slightly longer so
+# it can deliver the manager's final response or explicit timeout error instead
+# of abandoning a live request first.
+_RESPONSE_TIMEOUT = float(config.CODEX_RESPONSE_TIMEOUT_SECONDS + 60)
 
 
 async def _wait_for_response(
@@ -417,7 +420,9 @@ async def _wait_for_response(
         except asyncio.TimeoutError:
             continue
         if msg.get("type") == "activity":
-            if activity_tracker and msg.get("growing"):
+            same_source = msg.get("source") == source
+            same_request = request_id is None or msg.get("request_id") == request_id
+            if activity_tracker and msg.get("growing") and same_source and same_request:
                 activity_tracker.mark_activity()
             continue
         msg_source = msg.get("source")
@@ -442,13 +447,13 @@ async def _status_notifier(
     stop_event: asyncio.Event,
     activity_tracker: Optional[ActivityTracker] = None,
     initial_delay: float = 15.0,
-    interval: float = 60.0,
+    interval: float = 300.0,
     idle_threshold: float = _ACTIVITY_IDLE_THRESHOLD,
 ):
     """
-    Report working/waiting/stalled from time since the latest JSONL growth.
-    Polling is cheap and lets the stalled transition appear promptly even when
-    activity happens between the longer user-facing status intervals.
+    Report concise progress for a long turn. A quiet model is not evidence of
+    a crash: the manager now emits explicit heartbeats while its child process
+    is alive and owns the hard timeout/error path.
     """
     try:
         await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=initial_delay)
@@ -468,14 +473,9 @@ async def _status_notifier(
         if should_report:
             elapsed = int(now - tracker.started_at)
             if state == "working":
-                status = f"⏳ Claude is working... ({elapsed}s; activity {int(idle)}s ago)"
-            elif state == "stalled":
-                status = (
-                    f"⚠️ No response from Claude in {int(idle)}s — "
-                    "it may have crashed; consider /restart"
-                )
+                status = f"⏳ Axon is working... ({elapsed}s)"
             else:
-                status = "⚠️ Claude hasn't started responding — the message may not have been received."
+                status = f"⏳ Axon is still processing this turn... ({elapsed}s)"
             try:
                 await update.effective_message.reply_text(status)
             except Exception:

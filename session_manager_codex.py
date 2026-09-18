@@ -84,6 +84,7 @@ log = logging.getLogger(__name__)
 # exec subprocess itself exits when the turn completes; this is just a safety
 # net against a genuinely hung process.
 _RESPONSE_TIMEOUT = config.CODEX_RESPONSE_TIMEOUT_SECONDS
+_ACTIVITY_HEARTBEAT_SECONDS = 15.0
 
 
 @dataclass
@@ -119,6 +120,7 @@ class SessionManagerCodexNode:
         self.current_thread_id: Optional[str] = None
         self._first_turn_done = False
         self.codex_proc: Optional[subprocess.Popen] = None
+        self._active_exec_proc: Optional[subprocess.Popen] = None
         self.master_fd: Optional[int] = None
         self.pty_lock = threading.Lock()
         self._spawn_time = 0.0
@@ -380,9 +382,14 @@ class SessionManagerCodexNode:
 
     def _wait_for_rollout_response(self, path: Path, offset: int) -> tuple[str, Optional[str]]:
         deadline = time.time() + _RESPONSE_TIMEOUT
+        next_heartbeat = 0.0
         response_text = ""
         remainder = ""
         while time.time() < deadline and self._running:
+            now = time.time()
+            if now >= next_heartbeat:
+                self._publish_activity()
+                next_heartbeat = now + _ACTIVITY_HEARTBEAT_SECONDS
             time.sleep(0.2)
             if not path.exists():
                 continue
@@ -474,6 +481,8 @@ class SessionManagerCodexNode:
         cmd = self._exec_codex_command(lane, model)
         location = "remote" if self._remote_mode else "routed"
         self._forward_display(f"\r\n[{location} Codex turn: {lane}/{model}]\r\n".encode())
+        proc: Optional[subprocess.Popen] = None
+        result: dict[str, object] = {}
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -484,20 +493,55 @@ class SessionManagerCodexNode:
                 cwd=config.PROJECT_DIR,
             )
             with self.pty_lock:
-                self.codex_proc = proc
-            stdout, stderr = proc.communicate(input=message_text, timeout=_RESPONSE_TIMEOUT)
+                self._active_exec_proc = proc
+
+            # communicate() must drain stdout/stderr concurrently or a verbose
+            # JSON event stream can fill an OS pipe and deadlock. Run it in a
+            # helper thread so this thread can publish liveness heartbeats while
+            # Codex is legitimately busy. This does not retry the turn.
+            def communicate() -> None:
+                try:
+                    result["streams"] = proc.communicate(input=message_text)
+                except Exception as exc:  # surfaced below in the owner thread
+                    result["error"] = exc
+
+            worker = threading.Thread(target=communicate, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + _RESPONSE_TIMEOUT
+            self._publish_activity()
+            while worker.is_alive() and time.monotonic() < deadline:
+                worker.join(timeout=_ACTIVITY_HEARTBEAT_SECONDS)
+                if worker.is_alive():
+                    self._publish_activity()
+            if worker.is_alive():
+                proc.terminate()
+                worker.join(timeout=5)
+                if worker.is_alive():
+                    proc.kill()
+                    worker.join(timeout=5)
+                return "", f"{location.capitalize()} Codex turn exceeded timeout"
+            if "error" in result:
+                error = result["error"]
+                if isinstance(error, BaseException):
+                    raise error
+                raise RuntimeError(str(error))
+            stdout, stderr = result.get("streams", ("", ""))
         except subprocess.TimeoutExpired:
-            proc.terminate()
+            # Kept for compatibility with mocked Popen implementations.
+            if proc is not None:
+                proc.terminate()
             try:
-                proc.wait(timeout=5)
+                if proc is not None:
+                    proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                if proc is not None:
+                    proc.kill()
             return "", f"{location.capitalize()} Codex turn exceeded timeout"
         except Exception as exc:
             return "", f"{location.capitalize()} Codex launch failed: {exc}"
         finally:
             with self.pty_lock:
-                self.codex_proc = None
+                self._active_exec_proc = None
 
         response_text = ""
         error_message: Optional[str] = None
@@ -543,6 +587,30 @@ class SessionManagerCodexNode:
                     dead.append(conn)
             for conn in dead:
                 self.display_clients.remove(conn)
+
+    def _publish_activity(self) -> None:
+        """Publish correlated liveness for the currently executing request."""
+        with self.state_lock:
+            item = self.current_item
+        if item is None:
+            return
+        payload = json.dumps({
+            "type": "activity",
+            "growing": True,
+            "source": item.source,
+            "user_id": item.user_id,
+            "request_id": item.request_id,
+        }) + "\n"
+        payload_bytes = payload.encode()
+        with self.response_subs_lock:
+            dead = []
+            for conn in self.response_subscribers:
+                try:
+                    conn.sendall(payload_bytes)
+                except Exception:
+                    dead.append(conn)
+            for conn in dead:
+                self.response_subscribers.remove(conn)
 
     # ------------------------------------------------------------------
     # Queue processor
@@ -1056,6 +1124,8 @@ class SessionManagerCodexNode:
         self._running = False
         self.input_queue.put(None)
         with self.pty_lock:
+            if self._active_exec_proc is not None and self._active_exec_proc.poll() is None:
+                self._active_exec_proc.terminate()
             if self.codex_proc is not None and self.codex_proc.poll() is None:
                 self.codex_proc.terminate()
             if self.master_fd is not None:

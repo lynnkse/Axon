@@ -143,6 +143,21 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
             self.node._pty_reader_thread()
         self.node._forward_display.assert_not_called()
 
+    def test_activity_heartbeat_is_correlated_to_current_request(self):
+        subscriber = Mock()
+        self.node.state_lock = threading.Lock()
+        self.node.current_item = self.item
+        self.node.response_subs_lock = threading.Lock()
+        self.node.response_subscribers = [subscriber]
+
+        self.node._publish_activity()
+
+        payload = json.loads(subscriber.sendall.call_args.args[0].decode())
+        self.assertEqual(payload["type"], "activity")
+        self.assertEqual(payload["source"], "telegram")
+        self.assertEqual(payload["user_id"], "anton")
+        self.assertEqual(payload["request_id"], self.item.request_id)
+
     def test_local_tui_does_not_redraw_raw_actor_answer_after_turn(self):
         self.node._running = True
         self.node.master_fd = 1

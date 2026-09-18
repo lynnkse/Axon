@@ -20,9 +20,9 @@ def test_wait_for_response_refreshes_timestamp_for_every_activity_event():
     class Subscriber:
         def __init__(self):
             self.messages = iter([
-                {"type":"activity","growing":True},
-                {"type":"activity","growing":True},
-                {"source":"telegram","text":"done"},
+                {"type":"activity", "growing":True, "source":"telegram", "request_id":"current"},
+                {"type":"activity", "growing":True, "source":"telegram", "request_id":"current"},
+                {"source":"telegram", "request_id":"current", "text":"done"},
             ])
 
         async def get(self):
@@ -31,6 +31,30 @@ def test_wait_for_response_refreshes_timestamp_for_every_activity_event():
     tracker = ActivityTracker(started_at=0.0)
     marks=[]
     tracker.mark_activity = lambda now=None: marks.append(now)
-    result = asyncio.run(_wait_for_response(Subscriber(), "telegram", tracker))
+    result = asyncio.run(_wait_for_response(
+        Subscriber(), "telegram", tracker, request_id="current",
+    ))
     assert result == "done"
     assert len(marks) == 2
+
+
+def test_wait_for_response_ignores_activity_for_another_request():
+    class Subscriber:
+        def __init__(self):
+            self.messages = iter([
+                {"type":"activity", "growing":True, "source":"telegram", "request_id":"old"},
+                {"type":"activity", "growing":True, "source":"telegram", "request_id":"current"},
+                {"source":"telegram", "request_id":"current", "text":"done"},
+            ])
+
+        async def get(self):
+            return next(self.messages)
+
+    tracker = ActivityTracker(started_at=0.0)
+    marks=[]
+    tracker.mark_activity = lambda now=None: marks.append(now)
+    result = asyncio.run(_wait_for_response(
+        Subscriber(), "telegram", tracker, request_id="current",
+    ))
+    assert result == "done"
+    assert len(marks) == 1
