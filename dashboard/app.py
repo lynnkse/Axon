@@ -4,6 +4,7 @@ Streamlit web app — accessible via Tailscale from any device.
 Tabs: Today's Food | Fitness Week | Alive State | File Viewer
 """
 
+import base64
 import json
 import os
 import html
@@ -50,6 +51,10 @@ AXON_INSTANCE = (os.environ.get("AXON_INSTANCE") or _env.get("AXON_INSTANCE", ""
                   or _socket.gethostname()).lower()
 
 DOCS_DIR = Path(__file__).parent.parent  # ~/Axon — serves HTMLs from here
+MR_BSP_PAPER_PDF = (
+    Path.home()
+    / "mr-bsp-simplification/papers/2025-IJRR-resubmission2/root.pdf"
+)
 
 
 def _sb_get(table: str, params: str = "") -> list:
@@ -576,12 +581,30 @@ MANIM_SCENES = Path.home() / "Axon/manim/scenes"
 MANIM_VIDEOS = Path.home() / "manim_videos"
 
 
+def _render_pdf(full_path: Path, height: int = 900, download_key=None):
+    """Render a PDF with the browser's scrollable viewer and a download fallback."""
+    pdf_bytes = full_path.read_bytes()
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    st.iframe(
+        f"data:application/pdf;base64,{pdf_b64}#toolbar=1&navpanes=0&view=FitH",
+        width="stretch",
+        height=height,
+    )
+    st.download_button(
+        "⬇ Download PDF",
+        pdf_bytes,
+        file_name=full_path.name,
+        mime="application/pdf",
+        key=download_key,
+    )
+
+
 def _render_file(full_path: Path, height: int = 700):
     """Render a single file inline."""
     if full_path.suffix == ".html":
         st.components.v1.html(full_path.read_text(encoding="utf-8", errors="replace"), height=height, scrolling=True)
     elif full_path.suffix == ".pdf":
-        st.download_button("⬇ Download PDF", full_path.read_bytes(), file_name=full_path.name, mime="application/pdf")
+        _render_pdf(full_path, height=height)
     elif full_path.suffix in (".mp4", ".webm", ".mov"):
         st.video(str(full_path))
 
@@ -1027,6 +1050,26 @@ with tab_projects:
 
                 proj_metadata = project.get("metadata") or {}
 
+                if name == "MR-BSP-Paper":
+                    with st.expander("📖 Current manuscript PDF", expanded=True):
+                        if MR_BSP_PAPER_PDF.is_file():
+                            modified_at = datetime.fromtimestamp(
+                                MR_BSP_PAPER_PDF.stat().st_mtime
+                            ).astimezone()
+                            st.caption(
+                                "Live compiled manuscript · updated "
+                                + modified_at.strftime("%Y-%m-%d %H:%M:%S %Z")
+                            )
+                            _render_pdf(
+                                MR_BSP_PAPER_PDF,
+                                height=900,
+                                download_key=f"project_manuscript_{project_id}",
+                            )
+                        else:
+                            st.warning(
+                                "Compiled manuscript not found. Build root.tex to create root.pdf."
+                            )
+
                 project_documents = proj_metadata.get("documents")
                 if isinstance(project_documents, list):
                     valid_documents = [
@@ -1058,15 +1101,22 @@ with tab_projects:
                                     st.warning(f"Document not found: {document_path.name}")
                                     continue
 
-                                st.download_button(
-                                    "⬇ Download PDF" if document_path.suffix.lower() == ".pdf"
-                                    else "⬇ Download document",
-                                    document_path.read_bytes(),
-                                    file_name=document_path.name,
-                                    mime=("application/pdf" if document_path.suffix.lower() == ".pdf"
-                                          else "application/octet-stream"),
-                                    key=f"project_document_{project_id}_{document_index}",
-                                )
+                                if document_path.suffix.lower() == ".pdf":
+                                    _render_pdf(
+                                        document_path,
+                                        height=760,
+                                        download_key=(
+                                            f"project_document_{project_id}_{document_index}"
+                                        ),
+                                    )
+                                else:
+                                    st.download_button(
+                                        "⬇ Download document",
+                                        document_path.read_bytes(),
+                                        file_name=document_path.name,
+                                        mime="application/octet-stream",
+                                        key=f"project_document_{project_id}_{document_index}",
+                                    )
                                 source = document.get("source")
                                 if source:
                                     source_path = (docs_root / str(source)).resolve()
