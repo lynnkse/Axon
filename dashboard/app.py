@@ -8,6 +8,8 @@ import base64
 import json
 import os
 import html
+import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -55,6 +57,7 @@ MR_BSP_PAPER_PDF = (
     Path.home()
     / "mr-bsp-simplification/papers/2025-IJRR-resubmission2/root.pdf"
 )
+CV_PDF = Path.home() / "cv/Anton_Gulyaev_CV.pdf"
 
 
 def _sb_get(table: str, params: str = "") -> list:
@@ -570,8 +573,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_cli, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
+tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_cli, tab_cv, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
+    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📑 CV", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
 )
 
 AILIN_DIR = Path.home() / "ailin"
@@ -597,6 +600,20 @@ def _render_pdf(full_path: Path, height: int = 900, download_key=None):
         mime="application/pdf",
         key=download_key,
     )
+
+
+@st.cache_data(show_spinner=False)
+def _pdf_page_preview(full_path: str, modified_at: float) -> bytes:
+    """Rasterize the first PDF page for mobile browsers that cannot embed PDFs."""
+    with tempfile.TemporaryDirectory(prefix="axon-pdf-") as tmpdir:
+        output = Path(tmpdir) / "page"
+        subprocess.run(
+            ["pdftoppm", "-png", "-singlefile", "-r", "180", full_path, str(output)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        return output.with_suffix(".png").read_bytes()
 
 
 def _render_file(full_path: Path, height: int = 700):
@@ -1807,6 +1824,33 @@ with tab_cli:
         """,
         height=_cli_height,
     )
+
+# ── Tab: CV ───────────────────────────────────────────────────────────────────
+with tab_cv:
+    st.subheader("Anton Gulyaev — CV")
+    if CV_PDF.is_file():
+        st.caption("Main CV · July 6, 2026 · rendered for reliable mobile viewing")
+        # Mobile browsers can leave a PDF data: URI iframe blank. Rendering
+        # this one-page CV as an image gives every browser a visible preview.
+        # Do not use Streamlit's /media delivery route here: mobile Safari can
+        # render the surrounding element yet leave that image request blank.
+        preview_png = _pdf_page_preview(str(CV_PDF), CV_PDF.stat().st_mtime)
+        preview_b64 = base64.b64encode(preview_png).decode("ascii")
+        st.markdown(
+            "<img alt=\"Anton Gulyaev CV\" "
+            "style=\"display:block;width:100%;height:auto;background:white;\" "
+            f"src=\"data:image/png;base64,{preview_b64}\">",
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "⬇ Download CV PDF",
+            CV_PDF.read_bytes(),
+            file_name=CV_PDF.name,
+            mime="application/pdf",
+            key="anton-cv-download",
+        )
+    else:
+        st.error(f"Current CV not found: {CV_PDF}")
 
 # ── Tab: File Viewer ──────────────────────────────────────────────────────────
 with tab_files:

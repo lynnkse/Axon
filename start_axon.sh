@@ -78,20 +78,40 @@ mkdir -p "$LOG_DIR" "$DASH_LOG_DIR"
 echo "Using python: $PYTHON"
 
 # ── Helper: check whether the process we expect is alive ─────────────────────
-# Each Axon service is a singleton by design (only one instance should ever
-# run system-wide), so a global pgrep for the pattern is sufficient — no need
-# to walk tmux pane process trees, which is fragile across shell/exec nesting.
-# match_pattern: a string that uniquely identifies this service's process
-#                (e.g. the script filename) in `ps -f` output.
+# Inspect only the process tree owned by the named tmux session. Ailin can run
+# the same scripts from the same checkout, but uses separate ailin_* sessions.
+session_process_exists() {
+    local session="$1"
+    local process_path="$2"
+    local script_name="${process_path##*/}"
+    local pid cmdline child
+    local -a queue children
+
+    mapfile -t queue < <(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null)
+    while (( ${#queue[@]} )); do
+        pid="${queue[0]}"
+        queue=("${queue[@]:1}")
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || true
+        [[ "$cmdline" == *"$process_path"* || "$cmdline" == *"$script_name"* ]] && return 0
+
+        mapfile -t children < <(ps -eo pid=,ppid= | awk -v parent="$pid" '$2 == parent {print $1}')
+        for child in "${children[@]}"; do
+            queue+=("$child")
+        done
+    done
+
+    return 1
+}
+
 is_session_healthy() {
     local session="$1"
-    local match_pattern="$2"
+    local process_path="$2"
 
     if ! tmux has-session -t "$session" 2>/dev/null; then
         return 1
     fi
 
-    pgrep -f "$match_pattern" >/dev/null 2>&1
+    session_process_exists "$session" "$process_path"
 }
 
 # ── Helper: launch a service without an interactive login shell ────────────
@@ -104,10 +124,10 @@ is_session_healthy() {
 # deliberately skips all profile/rc files.
 ensure_session() {
     local session="$1"
-    local match_pattern="$2"
+    local process_path="$2"
     local cmd="$3"
 
-    if is_session_healthy "$session" "$match_pattern"; then
+    if is_session_healthy "$session" "$process_path"; then
         echo "Session '$session' already healthy — leaving it alone."
         return 0
     fi
@@ -124,7 +144,7 @@ ensure_session() {
 
     local attempt
     for attempt in {1..30}; do
-        if is_session_healthy "$session" "$match_pattern"; then
+        if is_session_healthy "$session" "$process_path"; then
             echo "  -> '$session' started and confirmed healthy."
             return 0
         fi
@@ -139,29 +159,33 @@ ensure_session() {
 # Keep the surrounding Axon interfaces identical while allowing the engine
 # owner behind their shared socket contract to change per deployment.
 if [[ "${AXON_ENGINE:-claude}" == "codex" ]]; then
-    ensure_session manager "session_manager_codex.py" \
-        "cd '$AXON_DIR' && $PYTHON -u session_manager_codex.py 2>&1 | tee '$LOG_DIR/manager.log'"
+    ensure_session manager "$AXON_DIR/session_manager_codex.py" \
+        "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/session_manager_codex.py' 2>&1 | tee '$LOG_DIR/manager.log'"
 else
-    ensure_session manager "session_manager.py" \
-        "cd '$AXON_DIR' && $PYTHON -u session_manager.py 2>&1 | tee '$LOG_DIR/manager.log'"
+    ensure_session manager "$AXON_DIR/session_manager.py" \
+        "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/session_manager.py' 2>&1 | tee '$LOG_DIR/manager.log'"
 fi
 
 # ── 2. telegram — Telegram gateway ───────────────────────────────────────────
-ensure_session telegram "telegram_node.py" \
-    "cd '$AXON_DIR' && $PYTHON -u telegram_node.py 2>&1 | tee '$LOG_DIR/telegram.log'"
+ensure_session telegram "$AXON_DIR/telegram_node.py" \
+    "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/telegram_node.py' 2>&1 | tee '$LOG_DIR/telegram.log'"
 
 # ── 3. cli — CLI node (dashboard's CLI tab connects directly to the same
 #            display.sock/cli_input.sock via web_cli_bridge.py, no tmux/ttyd) ──
-ensure_session cli "cli_node.py" \
-    "cd '$AXON_DIR' && $PYTHON -u cli_node.py 2>&1 | tee '$LOG_DIR/cli.log'"
+# Keep the long-standing attach target stable.  The previous compact-chat
+# wrapper also used this name, which meant users could attach to that stale
+# pane while the real mirror was running separately as "cli".
+CLI_SESSION="${AXON_CLI_SESSION:-cli}"
+ensure_session "$CLI_SESSION" "$AXON_DIR/cli_node.py" \
+    "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/cli_node.py' 2>&1 | tee '$LOG_DIR/cli.log'"
 
 # ── 4. curator — daily knowledge maintenance ──────────────────────────────────
-ensure_session curator "curator.py" \
-    "cd '$AXON_DIR' && $PYTHON -u curator.py 2>&1 | tee '$LOG_DIR/curator.log'"
+ensure_session curator "$AXON_DIR/curator.py" \
+    "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/curator.py' 2>&1 | tee '$LOG_DIR/curator.log'"
 
 # ── 5. usage — deterministic hourly Codex quota monitor ─────────────────────
-ensure_session usage "codex_usage_monitor.py" \
-    "cd '$AXON_DIR' && $PYTHON -u codex_usage_monitor.py 2>&1 | tee '$LOG_DIR/codex_usage_monitor.log'"
+ensure_session usage "$AXON_DIR/codex_usage_monitor.py" \
+    "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/codex_usage_monitor.py' 2>&1 | tee '$LOG_DIR/codex_usage_monitor.log'"
 
 # ── 6. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
 # Both background processes are managed here; pane shows their combined status.
@@ -170,7 +194,6 @@ ensure_session usage "codex_usage_monitor.py" \
 TAILSCALE_IP="$(tailscale ip -4 2>/dev/null || echo '<tailscale-ip>')"
 
 WEB_CMD="$(cat <<WEBCMD
-pkill -f 'streamlit run.*app.py' 2>/dev/null; pkill -f 'ttyd.*tmux' 2>/dev/null; pkill -f 'web_cli_bridge.py' 2>/dev/null; sleep 1
 nohup $STREAMLIT run '$AXON_DIR/dashboard/app.py' \\
   --server.port 8501 --server.address 0.0.0.0 \\
   --server.headless true --browser.gatherUsageStats false \\
@@ -181,16 +204,16 @@ tail -f '$DASH_LOG_DIR/streamlit.log'
 WEBCMD
 )"
 
-# web session's health check is based on the streamlit process specifically,
-# since that pane runs a compound command (pkill+nohup+tail) not one script.
-ensure_session web "streamlit run.*app.py" "$WEB_CMD"
+# The web session's health check is based on its streamlit descendant because
+# the pane runs a compound command (nohup workers plus a log tail).
+ensure_session web "$AXON_DIR/dashboard/app.py" "$WEB_CMD"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════╗"
 echo "║           Axon stack status                  ║"
 echo "╠══════════════════════════════════════════════╣"
-echo "║  Sessions:   manager | telegram | cli         ║"
+echo "║  Sessions:   manager | telegram | cli║"
 echo "║              curator | usage | web            ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Dashboard:  http://$TAILSCALE_IP:8501"

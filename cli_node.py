@@ -203,9 +203,12 @@ class CLINode:
 
 
 if __name__ == "__main__":
-    if config.ACTORS_ENABLED:
-        # Actor replies contain a machine-readable trailer. Use the managed
-        # request/response path so it is validated and stripped before display.
+    # The default is a byte-for-byte mirror of Codex's own terminal UI.  It
+    # preserves the native prompt, completion, tool/status output, and keys
+    # such as Tab and Enter.  Keep the compact request/response client as an
+    # explicit opt-in for operational use, rather than silently substituting
+    # it whenever actor handling is enabled.
+    if os.environ.get("AXON_CLI_MODE", "mirror").strip().lower() == "chat":
         from codex_chat_cli import main as chat_main
         chat_main()
     else:

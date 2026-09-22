@@ -8,42 +8,73 @@
 
 echo "Stopping Axon processes..."
 
-# ── Kill the known long-running Axon processes by pattern ────────────────────
-PATTERNS=(
-    "session_manager.py"
-    "session_manager_codex.py"
-    "telegram_node.py"
-    "cli_node.py"
-    "curator.py"
-    "codex_usage_monitor.py"
-    "streamlit run.*app.py"
-    "ttyd.*browser_view"
-)
+AXON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for pattern in "${PATTERNS[@]}"; do
-    if pgrep -f "$pattern" >/dev/null 2>&1; then
-        echo "  killing: $pattern"
-        pkill -f "$pattern" 2>/dev/null
-    fi
-done
+# Return the complete process tree owned by one tmux session. This is the
+# ownership boundary: Axon sessions are manager/telegram/etc.; Ailin uses
+# ailin_manager, ailin_telegram, and ailin_watchdog even though both can run
+# scripts from the same checkout.
+session_tree_pids() {
+    local session="$1"
+    local pid child
+    local -a queue children
 
-# Give processes a moment to exit cleanly before force-killing stragglers.
-sleep 1
-for pattern in "${PATTERNS[@]}"; do
-    if pgrep -f "$pattern" >/dev/null 2>&1; then
-        echo "  force-killing (still alive after SIGTERM): $pattern"
-        pkill -9 -f "$pattern" 2>/dev/null
-    fi
-done
+    mapfile -t queue < <(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null)
+    while (( ${#queue[@]} )); do
+        pid="${queue[0]}"
+        queue=("${queue[@]:1}")
+        echo "$pid"
+        mapfile -t children < <(ps -eo pid=,ppid= | awk -v parent="$pid" '$2 == parent {print $1}')
+        for child in "${children[@]}"; do
+            queue+=("$child")
+        done
+    done
+}
 
-# ── Kill the tmux sessions themselves ─────────────────────────────────────────
+# ── Stop only Axon's exact tmux sessions and their process trees ─────────────
+# cli is the persistent public attach target for the native Codex
+# mirror.  "cli" is included once to remove old deployments that created a
+# second mirror under the temporary name used during the migration.
 SESSIONS=(manager telegram cli curator usage web browser_view)
+declare -a axon_pids=()
 
 for session in "${SESSIONS[@]}"; do
     if tmux has-session -t "$session" 2>/dev/null; then
+        mapfile -t tree_pids < <(session_tree_pids "$session")
+        axon_pids+=("${tree_pids[@]}")
         echo "  closing tmux session: $session"
         tmux kill-session -t "$session" 2>/dev/null
     fi
 done
+
+# A tmux session normally sends SIGHUP to its full pane tree. Explicitly stop
+# any captured descendants that outlive the pane, such as nohup web workers.
+if (( ${#axon_pids[@]} )); then
+    kill "${axon_pids[@]}" 2>/dev/null || true
+    sleep 1
+    for pid in "${axon_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+fi
+
+# The dashboard bridge is started with nohup so an older deployment can leave
+# it reparented after its tmux pane dies.  Stop only bridge processes executing
+# from this Axon checkout; do not touch similarly named services elsewhere.
+declare -a bridge_pids=()
+while IFS= read -r pid; do
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    [[ "$cmdline" == *"$AXON_DIR/web_cli_bridge.py"* ]] && bridge_pids+=("$pid")
+done < <(pgrep -f 'web_cli_bridge\.py' 2>/dev/null || true)
+
+if (( ${#bridge_pids[@]} )); then
+    echo "  stopping Axon web bridge: ${bridge_pids[*]}"
+    kill "${bridge_pids[@]}" 2>/dev/null || true
+    sleep 1
+    for pid in "${bridge_pids[@]}"; do
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    done
+fi
 
 echo "Axon stack stopped."

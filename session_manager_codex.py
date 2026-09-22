@@ -52,6 +52,18 @@ import termios
 import struct
 import glob
 from datetime import datetime, timezone
+
+
+def _attach_controlling_pty() -> None:
+    """Make the child PTY the Codex TUI's controlling terminal.
+
+    Codex opens and queries its controlling terminal for full-screen rendering.
+    Merely wiring stdin/stdout/stderr to a PTY is insufficient when the manager
+    itself runs inside tmux: without a new session and TIOCSCTTY, those queries
+    can target the manager's terminal instead of the mirrored PTY.
+    """
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -344,6 +356,7 @@ class SessionManagerCodexNode:
         proc = subprocess.Popen(
             cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
             cwd=config.PROJECT_DIR,
+            preexec_fn=_attach_controlling_pty,
         )
         os.close(slave_fd)
         with self.pty_lock:
@@ -366,11 +379,9 @@ class SessionManagerCodexNode:
                 break
             if not chunk:
                 break
-            # The TUI can redraw the previous answer after current_item is
-            # cleared. Never mirror raw TUI bytes when actors are enabled;
-            # _publish_clean_response sends the validated, stripped answer.
-            if config.ACTORS_ENABLED:
-                continue
+            # A local CLI is a mirror of the native Codex TUI.  Actor mode
+            # constrains relay messages, but must not hide the user-visible
+            # status, tool calls, output, or editor UI from that mirror.
             self._forward_display(chunk)
         if self._running:
             log.error("Codex TUI exited unexpectedly")
@@ -852,9 +863,10 @@ class SessionManagerCodexNode:
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         response_text = self._transform_instance_response(item, response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
-        # Remote mode has no TUI; actor-enabled local turns suppress the raw
-        # TUI stream for the same reason. Both display this validated text.
-        if (self._remote_mode or config.ACTORS_ENABLED) and clean_text:
+        # A local display client already receives the native TUI stream.  Do
+        # not append the parsed final answer there as well, or it appears
+        # twice.  Remote execution has no local TUI, so it needs this text.
+        if self._remote_mode and clean_text:
             self._forward_display(("\r\n" + clean_text + "\r\n").encode())
         supabase_client.save_message(
             role="assistant", content=clean_text, channel=config.SESSION_CHANNEL,
