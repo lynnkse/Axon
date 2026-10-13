@@ -56,6 +56,23 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+class _TelegramCredentialFormatter(logging.Formatter):
+    def __init__(self, original):
+        super().__init__()
+        self.original = original or logging.Formatter()
+
+    def format(self, record):
+        # Redact the final rendering, including exception tracebacks.
+        message = self.original.format(record)
+        message = re.sub(r"https://api\.telegram\.org/(?:file/)?bot[^/\s]+", "[telegram endpoint]", message)
+        return re.sub(r"\b\d{7,}:[A-Za-z0-9_-]{25,}", "[bot token redacted]", message)
+
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(_TelegramCredentialFormatter(handler.formatter))
+if config.INSTANCE == "ailin":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 # ── Memory tag stripping ──────────────────────────────────────────────────────
 
 _TAG_RE = re.compile(
@@ -227,7 +244,11 @@ class ResponseSubscriber:
                             continue
                         try:
                             msg = json.loads(line)
-                            if msg.get("type") == "confirm_request":
+                            if msg.get("source") == "slack":
+                                # Slack gateway subscribers consume their correlated replies.
+                                # Never enqueue Slack traffic for Telegram delivery.
+                                pass
+                            elif msg.get("type") == "confirm_request":
                                 self._loop.call_soon_threadsafe(
                                     self._confirm_queue.put_nowait, msg
                                 )
@@ -251,7 +272,7 @@ class ResponseSubscriber:
                                 # message. Visibility into RALPH stays via the RALPH tmux
                                 # pane / dashboard split view only.
                                 pass
-                            elif msg.get("source") == "reflection":
+                            elif msg.get("source") in ("reflection", "repair"):
                                 # Idle reflection ticks (affective loop v4) are internal
                                 # monologue -- same unbranched-source corruption risk as
                                 # ralph above. Dreams/insights they produce reach Anton
@@ -953,6 +974,13 @@ def _make_handlers(subscriber: ResponseSubscriber):
                 await _ingest_kb(update, "image", file_path, caption, f"image_{ts}")
                 return
 
+            # A shared photo is a conversational turn in Ailin's own voice.
+            if not caption and config.INSTANCE == "ailin":
+                caption = (
+                    "Look at the image Lynn shared and reply to him naturally as Ailin, "
+                    "in your established first-person conversational voice. "
+                    "Ground your response in what you can see and the current conversation."
+                )
             text = f"[Image: {file_path}]\n\n{caption or 'Analyze this image.'}"
             await _handle_and_reply(update, context, subscriber, text, media_path=file_path)
         except Exception as e:

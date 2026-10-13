@@ -12,12 +12,20 @@ import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
+
+from supabase_egress_telemetry import record_response
+
+from water_bill_validation import PROJECT_ID as WATER_BILL_PROJECT_ID
+from water_bill_validation import render_water_bill_validation
+from utility_overcharge import render_utility_overcharge
+from court_document import render_court_document
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _ENV_PATH = Path(__file__).parent.parent / ".env"
@@ -68,10 +76,22 @@ def _sb_get(table: str, params: str = "") -> list:
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     })
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read().decode())
+            body = r.read()
+            record_response(
+                component="dashboard", url=url, response_bytes=len(body),
+                status=getattr(r, "status", 200),
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+            return json.loads(body.decode())
     except Exception as e:
+        record_response(
+            component="dashboard", url=url, response_bytes=0,
+            status=getattr(e, "code", 0) or 0,
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
         st.error(f"Supabase error: {e}")
         return []
 
@@ -101,6 +121,7 @@ def _actor_display_name(actor_id: str, actor_type: str) -> str:
         "condor-cluster-actor": "Condor Cluster Monitor",
         "anton-state-tracker": "Anton State Tracker",
         "fitness-food-coach": "Fitness & Food Coach",
+        "supabase-egress-monitor": "Supabase Egress Monitor",
     }
     return names.get(actor_id, actor_type.replace("-", " ").title())
 
@@ -573,8 +594,50 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_cli, tab_cv, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📑 CV", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
+_DASHBOARD_TAB_LABELS = [
+    "🍽 Food Today", "💪 Fitness Week", "📚 Study", "🧠 Alive State",
+    "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture",
+    "🖥 CLI", "📑 CV", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin",
+]
+_PROJECTS_TAB_LABEL = "🧭 Projects"
+
+
+def _query_param_value(name: str) -> str | None:
+    """Return one normalized query-parameter value across Streamlit versions."""
+    value = st.query_params.get(name)
+    if isinstance(value, list):
+        value = value[-1] if value else None
+    return str(value) if value not in (None, "") else None
+
+
+def _remember_dashboard_tab() -> None:
+    selected = st.session_state.get("dashboard_active_view_v2")
+    if selected in _DASHBOARD_TAB_LABELS:
+        st.query_params["view"] = selected
+
+
+def _remember_project_expander(project_id: str, state_key: str) -> None:
+    """Deep-link the open project so a browser refresh restores the same view."""
+    if st.session_state.get(state_key):
+        st.query_params["view"] = _PROJECTS_TAB_LABEL
+        st.query_params["project"] = project_id
+    elif _query_param_value("project") == project_id:
+        del st.query_params["project"]
+
+
+_requested_tab = _query_param_value("view")
+_default_tab = (
+    _requested_tab if _requested_tab in _DASHBOARD_TAB_LABELS
+    else _DASHBOARD_TAB_LABELS[0]
+)
+
+_active_dashboard_view = st.pills(
+    "Dashboard view",
+    _DASHBOARD_TAB_LABELS,
+    default=_default_tab,
+    key="dashboard_active_view_v2",
+    on_change=_remember_dashboard_tab,
+    width="stretch",
 )
 
 AILIN_DIR = Path.home() / "ailin"
@@ -626,7 +689,7 @@ def _render_file(full_path: Path, height: int = 700):
         st.video(str(full_path))
 
 # ── Tab: Food Today ───────────────────────────────────────────────────────────
-with tab_food:
+if _active_dashboard_view == "🍽 Food Today":
     st.subheader(f"Food — {date.today().isoformat()}")
     today = date.today().isoformat()
     rows = _sb_get("food_entries", f"date=eq.{today}&order=id.asc&select=food_item,portion,calories,protein_g,fat_g,carbs_g,notes")
@@ -676,7 +739,7 @@ with tab_food:
         st.rerun()
 
 # ── Tab: Fitness Week ─────────────────────────────────────────────────────────
-with tab_fitness:
+if _active_dashboard_view == "💪 Fitness Week":
     st.subheader("Fitness — last 7 days")
     week_ago = (date.today() - timedelta(days=7)).isoformat()
     rows = _sb_get("fitness_log", f"date=gte.{week_ago}&order=date.desc&select=date,weight_kg,pushups_sets,pushups_reps,pullups_sets,pullups_reps,pistol_sets,pistol_reps,notes")
@@ -707,8 +770,49 @@ with tab_fitness:
     if st.button("🔄 Refresh fitness"):
         st.rerun()
 
+# ── Tab: Study ────────────────────────────────────────────────────────────────
+if _active_dashboard_view == "📚 Study":
+    st.subheader("Study progress")
+    books = _sb_get("study_books", "order=created_at.desc&select=id,title,author,total_pages")
+
+    if not books:
+        st.info("No books tracked yet.")
+    else:
+        for book in books:
+            topics = _sb_get(
+                "study_topics",
+                f"book_id=eq.{book['id']}&order=created_at.asc&select=id,name,status,progress,progress_notes,progress_log",
+            )
+            total_pages = book.get("total_pages")
+            pages_done = max((t.get("progress") or 0) for t in topics) if topics else 0
+
+            with st.container(border=True):
+                st.markdown(f"**{book['title']}** — {book.get('author', '')}")
+                if total_pages:
+                    st.progress(min(1.0, pages_done / total_pages), text=f"{pages_done} / {total_pages} pages")
+                else:
+                    st.caption(f"{pages_done} pages logged (total unknown)")
+
+                for t in topics:
+                    with st.expander(f"{t['name']} — {t.get('status', '')} (p.{t.get('progress', 0)})"):
+                        if t.get("progress_notes"):
+                            st.write(t["progress_notes"])
+
+                        log = t.get("progress_log") or []
+                        if len(log) >= 2:
+                            xs = [entry["at"] for entry in log]
+                            ys = [entry["progress"] for entry in log]
+                            fig = go.Figure(go.Scatter(x=xs, y=ys, mode="lines+markers", line_color="#9C6ADE"))
+                            fig.update_layout(height=180, margin=dict(t=10, b=0, l=0, r=0), yaxis_title="page")
+                            st.plotly_chart(fig, use_container_width=True)
+                        elif log:
+                            st.caption(f"First snapshot logged {log[0]['at']} — chart appears after the next update.")
+
+    if st.button("🔄 Refresh study"):
+        st.rerun()
+
 # ── Tab: Alive State ──────────────────────────────────────────────────────────
-with tab_alive:
+if _active_dashboard_view == "🧠 Alive State":
     st.subheader("Live Module State")
     rows = _sb_get("alive_state", "id=eq.1&limit=1")
     if rows:
@@ -749,7 +853,7 @@ with tab_alive:
         st.rerun()
 
 # ── Tab: Anton State ──────────────────────────────────────────────────────────
-with tab_anton:
+if _active_dashboard_view == "🥋 Anton State":
     st.markdown(
         '<div class="dojo-shell"><div class="dojo-eyebrow">Discipline telemetry · cyber dojo</div>'
         '<div class="dojo-title">Anton State 道</div>'
@@ -922,7 +1026,7 @@ with tab_anton:
         st.rerun()
 
 # ── Tab: Actors ───────────────────────────────────────────────────────────────
-with tab_actors:
+if _active_dashboard_view == "🎭 Actors":
     st.subheader("Axon Updates")
     st.caption(
         "Persistent workers shared across Axon instances. Each card explains what the "
@@ -1016,7 +1120,7 @@ with tab_actors:
         st.rerun()
 
 # ── Tab: Ongoing Projects ─────────────────────────────────────────────────────
-with tab_projects:
+if _active_dashboard_view == "🧭 Projects":
     st.subheader("Ongoing Projects")
     st.caption("Anton's current work areas as cognitive threads. Open a project to inspect its recent accumulated insight history.")
     projects = _sb_get(
@@ -1028,12 +1132,31 @@ with tab_projects:
             "active": "#2E8B70", "ongoing": "#2E8B70", "paused": "#D99A2B",
             "completed": "#6B7A8F", "archived": "#88739E",
         }
+        requested_project_id = _query_param_value("project")
         for project in projects:
             project_id = project.get("id")
             name = project.get("name") or "Unnamed project"
             status = project.get("status") or "unknown"
             domain = project.get("domain") or "general"
-            with st.expander(f"◫  {name}  ·  {domain}  ·  {status}", expanded=False):
+            project_state_key = f"project_open_{project_id}"
+            with st.expander(
+                f"◫  {name}  ·  {domain}  ·  {status}",
+                expanded=(requested_project_id == str(project_id)),
+                key=project_state_key,
+                on_change=_remember_project_expander,
+                args=(str(project_id), project_state_key),
+            ):
+                # Streamlit expanders execute their contents even while collapsed.
+                # Keep project bodies lazy so a refresh does not query and render
+                # every project in the database before showing the selected one.
+                project_details_active = (
+                    requested_project_id == str(project_id)
+                    or bool(st.session_state.get(project_state_key))
+                )
+                if not project_details_active:
+                    st.caption("Open this project to load its details.")
+                    continue
+
                 badges = (_badge(status, status_colors.get(status.lower(), "#6B7A8F"))
                           + _badge(domain, "#2E6F9E"))
                 st.markdown(
@@ -1066,6 +1189,11 @@ with tab_projects:
                                         st.caption("No stage detail recorded yet.")
 
                 proj_metadata = project.get("metadata") or {}
+
+                if str(project_id) == WATER_BILL_PROJECT_ID:
+                    render_utility_overcharge(project)
+                    render_water_bill_validation(project)
+                    render_court_document(project)
 
                 if name == "MR-BSP-Paper":
                     with st.expander("📖 Current manuscript PDF", expanded=True):
@@ -1213,58 +1341,12 @@ with tab_projects:
                     f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=sequence.asc"
                     "&select=id,name,description,data_source,results_table,dynamics_table,diagrams,notes",
                 )
-                for experiment in experiments:
-                    exp_name = experiment.get("name") or "Untitled experiment"
-                    with st.expander(f"🧪 {exp_name}", expanded=False):
-                        if experiment.get("description"):
-                            st.markdown(experiment["description"])
-
-                        exp_source = experiment.get("data_source")
-                        if isinstance(exp_source, dict) and exp_source.get("path"):
-                            st.markdown(
-                                f'<div class="memory-block" style="font-family: monospace; font-size: 0.85em;">'
-                                f'📁 <strong>Data source:</strong> {html.escape(exp_source["path"])}'
-                                + (f'<div class="memory-meta">{html.escape(exp_source["note"])}</div>' if exp_source.get("note") else "")
-                                + '</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                        exp_table = experiment.get("results_table")
-                        if isinstance(exp_table, dict) and exp_table.get("rows"):
-                            st.markdown(f"##### {exp_table.get('title', 'Results')}")
-                            columns = exp_table.get("columns") or []
-                            st.dataframe(
-                                [dict(zip(columns, row)) for row in exp_table["rows"]],
-                                use_container_width=True, hide_index=True,
-                            )
-                            if exp_table.get("note"):
-                                st.caption(exp_table["note"])
-
-                        exp_dynamics = experiment.get("dynamics_table")
-                        if isinstance(exp_dynamics, dict) and exp_dynamics.get("rows"):
-                            st.markdown(f"##### {exp_dynamics.get('title', 'Dynamics')}")
-                            columns = exp_dynamics.get("columns") or []
-                            st.dataframe(
-                                [dict(zip(columns, row)) for row in exp_dynamics["rows"]],
-                                use_container_width=True, hide_index=True,
-                                column_config={col: st.column_config.Column(col) for col in columns},
-                            )
-                            if exp_dynamics.get("note"):
-                                st.caption(exp_dynamics["note"])
-
-                        exp_diagrams = experiment.get("diagrams")
-                        if isinstance(exp_diagrams, list) and exp_diagrams:
-                            cols_per_row = 2
-                            for row_start in range(0, len(exp_diagrams), cols_per_row):
-                                row_diagrams = exp_diagrams[row_start:row_start + cols_per_row]
-                                cols = st.columns(cols_per_row)
-                                for col, diagram in zip(cols, row_diagrams):
-                                    if isinstance(diagram, dict) and diagram.get("url"):
-                                        with col:
-                                            st.image(diagram["url"], caption=diagram.get("caption") or "", use_container_width=True)
-
-                        if experiment.get("notes"):
-                            st.caption(experiment["notes"])
+                if experiments:
+                    import importlib
+                    import experiment_map
+                    render_map = importlib.reload(experiment_map).render_map
+                    st.markdown(f"##### Experiment map · {len(experiments)} recorded nodes")
+                    components.html(render_map(experiments, project.get("name", "")), height=800, scrolling=True)
 
                 insights = _sb_get(
                     "insights",
@@ -1306,7 +1388,7 @@ with tab_projects:
 # 2026-08-11, then implemented here on ROG rather than letting Codex write the
 # dashboard file directly -- keeps the actual write path on this side per the
 # Reasoner/Executor split worked out earlier this session.
-with tab_architecture:
+if _active_dashboard_view == "🗺 Architecture":
     st.subheader("Axon Architecture")
     st.caption("Deployed relay views plus the corrected prompt-embedded actor design. No actor timers, polling, background process, or separate actor LLM calls.")
 
@@ -1755,7 +1837,7 @@ the exact same hook methods on its own side, reusing this same mechanism rather 
         )
 
 # ── Tab: CLI ────────────────────────────────────────────────────────────────
-with tab_cli:
+if _active_dashboard_view == "🖥 CLI":
     st.subheader("🖥 CLI — live terminal")
     st.caption(
         "Connects straight to SessionManagerNode's display/input sockets — "
@@ -1826,7 +1908,7 @@ with tab_cli:
     )
 
 # ── Tab: CV ───────────────────────────────────────────────────────────────────
-with tab_cv:
+if _active_dashboard_view == "📑 CV":
     st.subheader("Anton Gulyaev — CV")
     if CV_PDF.is_file():
         st.caption("Main CV · July 6, 2026 · rendered for reliable mobile viewing")
@@ -1853,7 +1935,7 @@ with tab_cv:
         st.error(f"Current CV not found: {CV_PDF}")
 
 # ── Tab: File Viewer ──────────────────────────────────────────────────────────
-with tab_files:
+if _active_dashboard_view == "📄 Files":
     st.subheader("File Viewer")
     all_files = (
         sorted(DOCS_DIR.glob("**/*.html")) +
@@ -1875,7 +1957,7 @@ with tab_files:
 # Split View tab disabled 2026-08-12 at Anton's request (interfered with CLI reading).
 
 # ── Tab: Manim ────────────────────────────────────────────────────────────────
-with tab_manim:
+if _active_dashboard_view == "🎬 Manim":
     st.subheader("🎬 Manim — Math Visualizations")
 
     col_left, col_right = st.columns([1, 2])
@@ -1914,7 +1996,7 @@ with tab_manim:
             st.info("Select a clip on the left to play it here.")
 
 # ── Tab: Database / Schema Overview ──────────────────────────────────────────
-with tab_database:
+if _active_dashboard_view == "◈ Database":
     st.subheader("Database / Schema Overview")
     st.caption(
         "Manually refreshed Supabase schema snapshot · 2026-08-12. "
@@ -2108,7 +2190,7 @@ digraph schema_knowledge {
 ''', use_container_width=True)
 
 # ── Tab: Ailin (Axon-Native Rebuild) ─────────────────────────────────────────
-with tab_ailin:
+if _active_dashboard_view == "🧬 Ailin":
     st.subheader("🧬 Ailin — Axon-Native Rebuild")
     st.caption(
         "Design doc + schema for the rebuilt Ailin (separate Supabase project, "

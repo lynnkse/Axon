@@ -1,0 +1,24 @@
+_metadata:
+  major_version: 1
+display_information:
+  name: Axon Bridge
+  description: Private Socket Mode bridge from one Slack channel to Axon
+features:
+  bot_user:
+    display_name: Axon
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - groups:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.groups
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  is_hosted: false
+  token_rotation_enabled: false

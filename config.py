@@ -123,3 +123,10 @@ CODEX_RESPONSE_TIMEOUT_SECONDS: int = max(
     60, int(get("CODEX_RESPONSE_TIMEOUT_SECONDS", "1800") or "1800")
 )
 CODEX_LOCK_FILE: str = f"{RELAY_DIR}/session_manager_codex.lock"
+
+# Ailin is an isolated instance. Its plugin owns persistence in its own project.
+# This also prevents legacy generic engine hooks from writing into central Axon.
+if INSTANCE == "ailin":
+    SUPABASE_URL = ""
+    SUPABASE_ANON_KEY = ""
+    SUPABASE_SERVICE_ROLE_KEY = ""

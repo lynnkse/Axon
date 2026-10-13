@@ -218,6 +218,7 @@ def _prompt_relevance_exists(path: str) -> bool | None:
 AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
 CONDOR_CHECK_COOLDOWN_SECONDS = 15 * 60
 CODEX_USAGE_CHECK_COOLDOWN_SECONDS = 60 * 60
+SUPABASE_EGRESS_CHECK_COOLDOWN_SECONDS = 60 * 60
 
 
 def latest_codex_weekly_usage() -> tuple[float, int] | None:
@@ -285,6 +286,13 @@ def prompt_actor_relevance_changed(actor_row: dict) -> bool | None:
         # advancing the row for two complete check periods.
         elapsed = _actor_elapsed(actor_row, "last_check_at")
         return elapsed is None or elapsed >= 2 * CODEX_USAGE_CHECK_COOLDOWN_SECONDS
+    if kind == "supabase-egress-monitor":
+        # The standalone ROG daemon owns this deterministic telemetry actor.
+        # Prompt injection is only a fail-safe after two missed hourly checks.
+        if config.INSTANCE != "rog":
+            return False
+        elapsed = _actor_elapsed(actor_row, "last_check_at")
+        return elapsed is None or elapsed >= 2 * SUPABASE_EGRESS_CHECK_COOLDOWN_SECONDS
     if kind == "ailin-health-actor":
         # The watchdog is checked periodically on its owning host, not on every chat.
         elapsed = _actor_elapsed(actor_row)

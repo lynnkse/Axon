@@ -1,7 +1,7 @@
 #!/bin/bash
 # start_axon.sh — bring up the full Axon stack from a clean slate
 #
-# manager | telegram | cli | curator | usage | web
+# manager | telegram | cli | curator | usage | supabase_usage | web
 #
 # Always starts by running shutdown_axon.sh to kill every known Axon process
 # and tmux session first, then brings everything back up fresh. This trades
@@ -175,7 +175,7 @@ ensure_session telegram "$AXON_DIR/telegram_node.py" \
 # Keep the long-standing attach target stable.  The previous compact-chat
 # wrapper also used this name, which meant users could attach to that stale
 # pane while the real mirror was running separately as "cli".
-CLI_SESSION="${AXON_CLI_SESSION:-cli}"
+CLI_SESSION="${AXON_CLI_SESSION:-axon_cli_relay}"
 ensure_session "$CLI_SESSION" "$AXON_DIR/cli_node.py" \
     "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/cli_node.py' 2>&1 | tee '$LOG_DIR/cli.log'"
 
@@ -187,7 +187,11 @@ ensure_session curator "$AXON_DIR/curator.py" \
 ensure_session usage "$AXON_DIR/codex_usage_monitor.py" \
     "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/codex_usage_monitor.py' 2>&1 | tee '$LOG_DIR/codex_usage_monitor.log'"
 
-# ── 6. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
+# ── 6. supabase_usage — deterministic local Supabase response-byte monitor ───
+ensure_session supabase_usage "$AXON_DIR/supabase_egress_monitor.py" \
+    "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/supabase_egress_monitor.py' 2>&1 | tee '$LOG_DIR/supabase_egress_monitor.log'"
+
+# ── 7. web — Streamlit dashboard + web_cli_bridge (direct socket bridge) ─────
 # Both background processes are managed here; pane shows their combined status.
 # CLI tab connects straight to session_manager's display.sock/cli_input.sock
 # via web_cli_bridge.py's WebSocket relay -- no tmux/ttyd involved anymore.
@@ -214,10 +218,16 @@ echo "╔═══════════════════════�
 echo "║           Axon stack status                  ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Sessions:   manager | telegram | cli║"
-echo "║              curator | usage | web            ║"
+echo "║              curator | usage | supabase_usage ║"
+echo "║              web                             ║"
 echo "╠══════════════════════════════════════════════╣"
 echo "║  Dashboard:  http://$TAILSCALE_IP:8501"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 echo "Attach to any session:  tmux attach -t <name>"
 echo "List all sessions:      tmux ls"
+
+# Native interactive Codex TUI. The Axon relay uses axon_cli_relay above.
+CODEX_TUI_SESSION="${AXON_CODEX_TUI_SESSION:-cli}"
+ensure_session "$CODEX_TUI_SESSION" "$AXON_DIR/open_remote_codex_tui.sh" \
+    "cd '$AXON_DIR' && '$AXON_DIR/open_remote_codex_tui.sh'"

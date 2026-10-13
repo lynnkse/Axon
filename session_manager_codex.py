@@ -43,8 +43,10 @@ import threading
 import queue
 import json
 import logging
+import uuid
 import subprocess
 import shlex
+import secrets
 import time
 import pty
 import fcntl
@@ -288,6 +290,8 @@ class SessionManagerCodexNode:
         previous = getattr(self, "_last_main_model", None)
         if not previous or previous == target_model:
             return ""
+        if config.INSTANCE == "ailin":
+            return self.instance_plugin.system_prompt_context()
         transcript = supabase_client.fetch_recent_messages(
             n=6, channel=config.SESSION_CHANNEL,
         )
@@ -433,12 +437,13 @@ class SessionManagerCodexNode:
 
     def _run_codex_turn(
         self, message_text: str, lane: str = "main", model: Optional[str] = None,
+        media_path: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         model = model or config.CODEX_MAIN_DEFAULT_MODEL
         # The default main lane remains attached to the shared interactive TUI.
         # Other lanes use persistent Codex thread IDs through `codex exec resume`.
         if self._remote_mode or lane != "main" or model != config.CODEX_MAIN_DEFAULT_MODEL:
-            return self._run_exec_codex_turn(message_text, lane, model)
+            return self._run_exec_codex_turn(message_text, lane, model, media_path)
 
         path = self._rollout_path()
         if path is None and not self.current_thread_id:
@@ -486,9 +491,76 @@ class SessionManagerCodexNode:
         return ["ssh", "-o", "BatchMode=yes", config.CODEX_REMOTE_HOST,
                 shlex.join(args)]
 
+    def _stage_remote_media(self, message_text: str, media_path: str) -> tuple[str, str]:
+        """Copy one relay attachment to the remote inference host."""
+        local_path = Path(media_path).expanduser().resolve(strict=True)
+        if not local_path.is_file():
+            raise ValueError(f"Media path is not a regular file: {media_path}")
+
+        suffix = local_path.suffix.lower()
+        if not suffix[1:].isalnum() or len(suffix) > 11:
+            suffix = ""
+        remote_dir = "/tmp/axon-relay-media"
+        remote_path = f"{remote_dir}/{secrets.token_hex(16)}{suffix}"
+
+        mkdir_cmd = [
+            "ssh", "-o", "BatchMode=yes", config.CODEX_REMOTE_HOST,
+            f"umask 077 && mkdir -p -- {shlex.quote(remote_dir)}",
+        ]
+        mkdir_result = subprocess.run(
+            mkdir_cmd, capture_output=True, text=True, timeout=30,
+        )
+        if mkdir_result.returncode != 0:
+            detail = mkdir_result.stderr.strip() or "remote mkdir failed"
+            raise RuntimeError(detail)
+
+        copy_cmd = [
+            "scp", "-q", "-o", "BatchMode=yes", "--", str(local_path),
+            f"{config.CODEX_REMOTE_HOST}:{remote_path}",
+        ]
+        copy_result = subprocess.run(
+            copy_cmd, capture_output=True, text=True, timeout=60,
+        )
+        if copy_result.returncode != 0:
+            detail = copy_result.stderr.strip() or "remote media copy failed"
+            raise RuntimeError(detail)
+
+        if media_path in message_text:
+            message_text = message_text.replace(media_path, remote_path)
+        else:
+            message_text += f"\n\n[Attached file: {remote_path}]"
+        return message_text, remote_path
+
+    def _cleanup_remote_media(self, remote_path: str) -> None:
+        cleanup_cmd = [
+            "ssh", "-o", "BatchMode=yes", config.CODEX_REMOTE_HOST,
+            f"rm -f -- {shlex.quote(remote_path)}",
+        ]
+        try:
+            result = subprocess.run(
+                cleanup_cmd, capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "Remote media cleanup failed for %s: %s",
+                    remote_path, result.stderr.strip(),
+                )
+        except Exception as exc:
+            log.warning("Remote media cleanup failed for %s: %s", remote_path, exc)
+
     def _run_exec_codex_turn(
         self, message_text: str, lane: str, model: str,
+        media_path: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
+        remote_media_path: Optional[str] = None
+        if self._remote_mode and media_path:
+            try:
+                message_text, remote_media_path = self._stage_remote_media(
+                    message_text, media_path,
+                )
+            except Exception as exc:
+                return "", f"Remote media staging failed: {exc}"
+
         cmd = self._exec_codex_command(lane, model)
         location = "remote" if self._remote_mode else "routed"
         self._forward_display(f"\r\n[{location} Codex turn: {lane}/{model}]\r\n".encode())
@@ -553,6 +625,8 @@ class SessionManagerCodexNode:
         finally:
             with self.pty_lock:
                 self._active_exec_proc = None
+            if remote_media_path:
+                self._cleanup_remote_media(remote_media_path)
 
         response_text = ""
         error_message: Optional[str] = None
@@ -583,10 +657,27 @@ class SessionManagerCodexNode:
     def _remote_codex_command(self) -> list[str]:
         return self._exec_codex_command("main", config.CODEX_MAIN_DEFAULT_MODEL)
 
-    def _run_remote_codex_turn(self, message_text: str) -> tuple[str, Optional[str]]:
-        return self._run_exec_codex_turn(
-            message_text, "main", config.CODEX_MAIN_DEFAULT_MODEL,
-        )
+    def _run_remote_codex_turn(
+        self, message_text: str, media_path: Optional[str] = None,
+    ) -> tuple[str, Optional[str]]:
+        # Compatibility entry point for callers that explicitly request a
+        # remote turn. Stage media before consulting instance mode so this also
+        # fails safely for lightweight test/operations objects.
+        remote_media_path: Optional[str] = None
+        if media_path:
+            try:
+                message_text, remote_media_path = self._stage_remote_media(
+                    message_text, media_path,
+                )
+            except Exception as exc:
+                return "", f"Remote media staging failed: {exc}"
+        try:
+            return self._run_exec_codex_turn(
+                message_text, "main", config.CODEX_MAIN_DEFAULT_MODEL,
+            )
+        finally:
+            if remote_media_path:
+                self._cleanup_remote_media(remote_media_path)
 
     def _forward_display(self, data: bytes):
         with self.display_lock:
@@ -642,6 +733,8 @@ class SessionManagerCodexNode:
             supabase_client.save_message(
                 role="user", content=item.text, channel=config.SESSION_CHANNEL,
             )
+            if config.INSTANCE == "ailin" and not item.request_id:
+                item.request_id = uuid.uuid4().hex
             self._on_instance_turn_received(item)
 
             permanent_rules = supabase_client.fetch_permanent_rules()
@@ -654,7 +747,7 @@ class SessionManagerCodexNode:
             prefix = (permanent_rules + "\n\n" if permanent_rules else "") + (relevant_rules or "")
 
             reflection_context = ""
-            if item.source == "telegram":
+            if config.INSTANCE == "ailin" or item.source == "telegram":
                 reflection_context = self._instance_context_for_turn(item)
 
             actor_rows = []
@@ -728,6 +821,7 @@ class SessionManagerCodexNode:
 
             response_text, error_message = self._run_codex_turn(
                 message_text, lane="main", model=main_decision.model,
+                media_path=item.media_path,
             )
             self._first_turn_done = True
             self._last_main_model = main_decision.model
