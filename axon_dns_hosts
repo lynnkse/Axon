@@ -1,0 +1,51 @@
+127.0.0.1	localhost
+127.0.1.1	lynnkse-ROG-Strix-G512LI-G512LI
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+
+# Temporary Axon Tailscale snapshot for TCP DNS containment
+100.73.56.102 lynnkse-rog-strix-g512li-g512li.tail005eac.ts.net lynnkse-rog-strix-g512li-g512li
+fd7a:115c:a1e0::5d34:3866 lynnkse-rog-strix-g512li-g512li.tail005eac.ts.net lynnkse-rog-strix-g512li-g512li
+100.66.1.77 michael-precision-tower-5810.tail005eac.ts.net michael-precision-tower-5810
+fd7a:115c:a1e0::2a34:14d michael-precision-tower-5810.tail005eac.ts.net michael-precision-tower-5810
+100.105.142.52 ubuntu.tail005eac.ts.net ubuntu
+fd7a:115c:a1e0::4534:8e34 ubuntu.tail005eac.ts.net ubuntu
+100.84.220.54 eladkalif.tail005eac.ts.net eladkalif
+fd7a:115c:a1e0::a034:dc36 eladkalif.tail005eac.ts.net eladkalif
+100.113.92.57 home-yaacov-1.tail005eac.ts.net home-yaacov-1
+fd7a:115c:a1e0::8334:5c3a home-yaacov-1.tail005eac.ts.net home-yaacov-1
+100.112.7.70 desktop-29bf5pi-1.tail005eac.ts.net desktop-29bf5pi-1
+fd7a:115c:a1e0::6034:747 desktop-29bf5pi-1.tail005eac.ts.net desktop-29bf5pi-1
+100.124.198.126 ipad-pro-11-gen-2.tail005eac.ts.net ipad-pro-11-gen-2
+fd7a:115c:a1e0::1d29:c67f ipad-pro-11-gen-2.tail005eac.ts.net ipad-pro-11-gen-2
+100.84.143.81 aevadim21.tail005eac.ts.net aevadim21
+fd7a:115c:a1e0::1434:8f51 aevadim21.tail005eac.ts.net aevadim21
+100.114.29.37 aevadim-09.tail005eac.ts.net aevadim-09
+fd7a:115c:a1e0::7101:1d50 aevadim-09.tail005eac.ts.net aevadim-09
+100.107.137.106 home-yaacov.tail005eac.ts.net home-yaacov
+fd7a:115c:a1e0::434:896c home-yaacov.tail005eac.ts.net home-yaacov
+100.83.219.90 andreyzhitnikov-z590-gaming-x.tail005eac.ts.net andreyzhitnikov-z590-gaming-x
+fd7a:115c:a1e0::7801:db8e andreyzhitnikov-z590-gaming-x.tail005eac.ts.net andreyzhitnikov-z590-gaming-x
+100.118.60.107 desktop-1an1r2e.tail005eac.ts.net desktop-1an1r2e
+fd7a:115c:a1e0::3b34:3c6c desktop-1an1r2e.tail005eac.ts.net desktop-1an1r2e
+100.98.191.76 leonid-z690-gaming-x-ddr4-1.tail005eac.ts.net leonid-z690-gaming-x-ddr4-1
+fd7a:115c:a1e0::b334:bf4c leonid-z690-gaming-x-ddr4-1.tail005eac.ts.net leonid-z690-gaming-x-ddr4-1
+100.71.90.48 leonid-z690-gaming-x-ddr4.tail005eac.ts.net leonid-z690-gaming-x-ddr4
+fd7a:115c:a1e0::b134:5a30 leonid-z690-gaming-x-ddr4.tail005eac.ts.net leonid-z690-gaming-x-ddr4
+100.115.28.52 aevadim-19.tail005eac.ts.net aevadim-19
+fd7a:115c:a1e0::9734:1c35 aevadim-19.tail005eac.ts.net aevadim-19
+100.64.248.68 laptop-s8ohg7f6.tail005eac.ts.net laptop-s8ohg7f6
+fd7a:115c:a1e0::2438:f844 laptop-s8ohg7f6.tail005eac.ts.net laptop-s8ohg7f6
+100.70.65.68 anpl-rog.tail005eac.ts.net anpl-rog
+fd7a:115c:a1e0::a134:4144 anpl-rog.tail005eac.ts.net anpl-rog
+100.124.161.105 desktop-ruv40sb.tail005eac.ts.net desktop-ruv40sb
+fd7a:115c:a1e0::2829:a16a desktop-ruv40sb.tail005eac.ts.net desktop-ruv40sb
+100.71.5.82 idan-swift.tail005eac.ts.net idan-swift
+fd7a:115c:a1e0::8334:552 idan-swift.tail005eac.ts.net idan-swift
+100.71.98.85 desktop-29bf5pi.tail005eac.ts.net desktop-29bf5pi
+fd7a:115c:a1e0::bf01:6286 desktop-29bf5pi.tail005eac.ts.net desktop-29bf5pi

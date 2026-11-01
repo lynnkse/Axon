@@ -1,5 +1,6 @@
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import config
@@ -17,6 +18,7 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         self.node._spawn_time = 0.0
         self.node._remote_mode = False
         self.node._thread_registry = {}
+        self.node._codex_tui_exited = threading.Event()
 
     def _spawn_command(self, thread_id=None):
         self.node.current_thread_id = thread_id
@@ -57,6 +59,27 @@ class SessionManagerCodexCompactionTests(unittest.TestCase):
         self.assertIn("resume", cmd)
         self.assertIn("thread-123", cmd)
         self.assertNotIn("-C", cmd)
+
+    def test_wait_for_rollout_fails_immediately_when_tui_exits(self):
+        self.node._running = True
+        self.node._codex_tui_exited.set()
+
+        response, error = self.node._wait_for_rollout_response(
+            Path("/definitely/not/a/rollout.jsonl"), 0,
+        )
+
+        self.assertEqual(response, "")
+        self.assertEqual(error, "Codex TUI exited unexpectedly")
+
+    def test_turn_rejects_dead_tui_before_writing_to_pty(self):
+        self.node._codex_tui_exited.set()
+        self.node.codex_proc = Mock()
+        self.node.codex_proc.poll.return_value = 1
+
+        response, error = self.node._run_codex_turn("health check")
+
+        self.assertEqual(response, "")
+        self.assertEqual(error, "Codex TUI is not running")
 
     def test_remote_fresh_thread_uses_ssh_exec_and_remote_project(self):
         self.node._remote_mode = True

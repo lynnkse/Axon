@@ -140,7 +140,7 @@ ensure_session() {
     fi
 
     tmux new-session -d -s "$session" -x 220 -y 50 \
-        /bin/bash --noprofile --norc -o pipefail -c "$cmd"
+        "$AXON_DIR/axon_dns_exec.sh" /bin/bash --noprofile --norc -o pipefail -c "$cmd"
 
     local attempt
     for attempt in {1..30}; do

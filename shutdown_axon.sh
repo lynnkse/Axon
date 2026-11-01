@@ -35,7 +35,7 @@ session_tree_pids() {
 # cli is the persistent public attach target for the native Codex
 # mirror.  "cli" is included once to remove old deployments that created a
 # second mirror under the temporary name used during the migration.
-SESSIONS=(manager telegram cli curator usage web browser_view)
+SESSIONS=(manager telegram cli axon_cli_relay curator usage supabase_usage web browser_view)
 declare -a axon_pids=()
 
 for session in "${SESSIONS[@]}"; do

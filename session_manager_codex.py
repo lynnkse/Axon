@@ -153,6 +153,11 @@ class SessionManagerCodexNode:
         self.response_subs_lock = threading.Lock()
 
         self._running = True
+        # A PTY reader reaching EOF means the persistent interactive Codex
+        # child is gone.  Turn waiters must fail promptly instead of only
+        # logging the exit and leaving gateways to show a typing indicator
+        # until their outer timeout.
+        self._codex_tui_exited = threading.Event()
         self._remote_mode = bool(config.CODEX_REMOTE_HOST)
 
     # ------------------------------------------------------------------
@@ -351,6 +356,7 @@ class SessionManagerCodexNode:
         else:
             cmd += ["-C", config.PROJECT_DIR]
         cmd += ["--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"]
+        self._codex_tui_exited.clear()
         master_fd, slave_fd = pty.openpty()
         self._set_pty_size(master_fd, 24, 80)
         self._rollouts_before_spawn = set(glob.glob(
@@ -388,7 +394,9 @@ class SessionManagerCodexNode:
             # status, tool calls, output, or editor UI from that mirror.
             self._forward_display(chunk)
         if self._running:
-            log.error("Codex TUI exited unexpectedly")
+            self._codex_tui_exited.set()
+            exit_code = self.codex_proc.poll() if self.codex_proc is not None else None
+            log.error("Codex TUI exited unexpectedly (exit_code=%s)", exit_code)
 
     def _write_to_pty(self, data: bytes) -> None:
         with self.pty_lock:
@@ -401,6 +409,8 @@ class SessionManagerCodexNode:
         response_text = ""
         remainder = ""
         while time.time() < deadline and self._running:
+            if self._codex_tui_exited.is_set():
+                return response_text, "Codex TUI exited unexpectedly"
             now = time.time()
             if now >= next_heartbeat:
                 self._publish_activity()
@@ -444,6 +454,13 @@ class SessionManagerCodexNode:
         # Other lanes use persistent Codex thread IDs through `codex exec resume`.
         if self._remote_mode or lane != "main" or model != config.CODEX_MAIN_DEFAULT_MODEL:
             return self._run_exec_codex_turn(message_text, lane, model, media_path)
+
+        # Avoid writing to a dead PTY.  The reader sets this event as soon as
+        # the interactive child exits, including before a new queued turn has
+        # begun waiting on a rollout file.
+        if (self._codex_tui_exited.is_set() or self.codex_proc is None
+                or self.codex_proc.poll() is not None):
+            return "", "Codex TUI is not running"
 
         path = self._rollout_path()
         if path is None and not self.current_thread_id:
