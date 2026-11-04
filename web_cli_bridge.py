@@ -72,9 +72,14 @@ async def handle_client(websocket):
         except Exception:
             pass
 
+    tasks = [asyncio.create_task(pty_to_ws()), asyncio.create_task(ws_to_pty())]
     try:
-        await asyncio.gather(pty_to_ws(), ws_to_pty())
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await websocket.close()
         display_writer.close()
         input_writer.close()
 

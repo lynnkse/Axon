@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic hourly Codex weekly-usage monitor.
+"""Deterministic two-hour Codex weekly-usage monitor.
 
 The monitor advances the shared Supabase actor without invoking the language
 model. It sends one Telegram alert per weekly quota window when usage first
@@ -23,7 +23,7 @@ import supabase_client
 
 log = logging.getLogger(__name__)
 ACTOR_ID = "codex-usage-monitor"
-CHECK_INTERVAL_SECONDS = 60 * 60
+CHECK_INTERVAL_SECONDS = 2 * 60 * 60
 RETRY_INTERVAL_SECONDS = 60
 DEFAULT_THRESHOLD_PERCENT = 85.0
 
@@ -82,7 +82,7 @@ def send_telegram_alert(text: str) -> bool:
 
 
 def check_once(now: datetime | None = None, send_alert=send_telegram_alert) -> str:
-    """Check and persist once if the actor's one-hour interval has elapsed."""
+    """Check and persist once if the actor's two-hour interval has elapsed."""
     now = (now or _utc_now()).astimezone(timezone.utc)
     row = _actor_row()
     if row is None:
@@ -122,9 +122,12 @@ def check_once(now: datetime | None = None, send_alert=send_telegram_alert) -> s
         summary = (f"Usage is {used_percent:g}%, but the {threshold:g}% Telegram alert "
                    "failed and will retry.")
     elif alert_sent:
-        summary = f"Usage is {used_percent:g}%; sent the {threshold:g}% alert for this weekly window."
+        summary = (f"Limits: {used_percent:g}% used · {100 - used_percent:g}% remaining · "
+                   f"reset {_reset_label(resets_at)}. Sent the {threshold:g}% alert.")
     else:
-        summary = f"Hourly check: usage is {used_percent:g}%, below the {threshold:g}% alert threshold."
+        summary = (f"Limits: {used_percent:g}% used · {100 - used_percent:g}% remaining · "
+                   f"reset {_reset_label(resets_at)}. Checked every 2h; "
+                   f"alert threshold {threshold:g}%.")
 
     update = SimpleNamespace(
         status="running", state=next_state, summary=summary, error_reason=None,
@@ -140,7 +143,7 @@ def main() -> None:
         format="%(asctime)s [codex-usage] %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    log.info("Monitor started: hourly checks, alert at 85%%")
+    log.info("Monitor started: two-hour checks, alert at 85%%")
     while True:
         try:
             result = check_once()

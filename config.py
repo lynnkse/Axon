@@ -122,4 +122,9 @@ CODEX_MAIN_DEFAULT_MODEL: str = get("CODEX_MAIN_DEFAULT_MODEL", "gpt-5.6-terra")
 CODEX_RESPONSE_TIMEOUT_SECONDS: int = max(
     60, int(get("CODEX_RESPONSE_TIMEOUT_SECONDS", "1800") or "1800")
 )
+# One request can contain an actor turn followed by the main turn. Keep one
+# bounded end-to-end budget (including queue/setup time) shared by all clients.
+CODEX_REQUEST_TIMEOUT_SECONDS: int = (
+    CODEX_RESPONSE_TIMEOUT_SECONDS * (2 if ACTORS_ENABLED else 1) + 120
+)
 CODEX_LOCK_FILE: str = f"{RELAY_DIR}/session_manager_codex.lock"

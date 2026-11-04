@@ -1,0 +1,8 @@
+{
+  "name": "Axon Voice",
+  "short_name": "Axon",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#10131a",
+  "theme_color": "#10131a"
+}

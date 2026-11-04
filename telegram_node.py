@@ -174,13 +174,10 @@ def _send_to_session_manager(text: str, source: str, user_id: str, media_path: O
     if media_path:
         msg["media_path"] = media_path
     payload = (json.dumps(msg) + "\n").encode()
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
         sock.connect(config.USER_INPUT_SOCK)
         sock.sendall(payload)
-        sock.close()
-    except Exception as e:
-        log.error(f"Failed to send to session manager: {e}")
     return request_id
 
 
@@ -202,6 +199,9 @@ class ResponseSubscriber:
         self._confirm_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._tui_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._proactive_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._finished_requests: set[tuple[str, str]] = set()
+        self._finished_order: list[tuple[str, str]] = []
+        self._finished_lock = threading.Lock()
         self._thread = threading.Thread(target=self._reader_thread, daemon=True)
         self._thread.start()
 
@@ -227,7 +227,12 @@ class ResponseSubscriber:
                             continue
                         try:
                             msg = json.loads(line)
-                            if msg.get("type") == "confirm_request":
+                            if msg.get("source") in {"chatgpt", "live_voice", "slack"}:
+                                # Gateway-originated final replies and interactive
+                                # prompts are consumed by their correlated gateway
+                                # subscriber. Never surface any of them in Telegram.
+                                pass
+                            elif msg.get("type") == "confirm_request":
                                 self._loop.call_soon_threadsafe(
                                     self._confirm_queue.put_nowait, msg
                                 )
@@ -239,7 +244,7 @@ class ResponseSubscriber:
                                 self._loop.call_soon_threadsafe(
                                     self._tui_queue.put_nowait, msg
                                 )
-                            elif msg.get("source") == "proactive":
+                            elif msg.get("source") == "proactive" and msg.get("type") != "activity":
                                 self._loop.call_soon_threadsafe(
                                     self._proactive_queue.put_nowait, msg
                                 )
@@ -257,10 +262,12 @@ class ResponseSubscriber:
                                 # ralph above. Dreams/insights they produce reach Anton
                                 # through recall injection, never as a direct chat message.
                                 pass
-                            else:
+                            elif msg.get("source") == "telegram" and not self._request_finished(msg):
                                 self._loop.call_soon_threadsafe(
                                     self._response_queue.put_nowait, msg
                                 )
+                            # Explicit allowlist: CLI, gateway and future source
+                            # tags must not accumulate in Telegram's reply queue.
                         except json.JSONDecodeError as e:
                             log.warning(f"Bad response JSON: {e}")
             except Exception as e:
@@ -271,6 +278,23 @@ class ResponseSubscriber:
                 except Exception:
                     pass
             time.sleep(0.5)
+
+    def _request_finished(self, message: dict) -> bool:
+        with self._finished_lock:
+            return (message.get("source"), message.get("request_id")) in self._finished_requests
+
+    def finish_request(self, source: str, request_id: Optional[str]) -> None:
+        """Drop late heartbeats/replies after completion or a transport timeout."""
+        if request_id is None:
+            return
+        key = (source, request_id)
+        with self._finished_lock:
+            if key in self._finished_requests:
+                return
+            self._finished_requests.add(key)
+            self._finished_order.append(key)
+            if len(self._finished_order) > 1024:
+                self._finished_requests.discard(self._finished_order.pop(0))
 
     async def get(self) -> dict:
         return await self._response_queue.get()
@@ -342,9 +366,19 @@ class ActivityTracker:
     """Per-request monotonic activity clock shared by response/status tasks."""
     started_at: float = field(default_factory=time.monotonic)
     last_activity_time: Optional[float] = None
+    last_heartbeat_time: Optional[float] = None
+    phase: str = "queued"
+    detail: str = ""
 
     def mark_activity(self, now: Optional[float] = None) -> None:
         self.last_activity_time = time.monotonic() if now is None else now
+
+    def observe(self, message: dict) -> None:
+        self.last_heartbeat_time = time.monotonic()
+        self.phase = message.get("phase") or self.phase
+        if message.get("growing"):
+            self.mark_activity()
+            self.detail = message.get("detail") or self.detail
 
     def idle_seconds(self, now: Optional[float] = None) -> float:
         current = time.monotonic() if now is None else now
@@ -358,6 +392,9 @@ def _activity_state(
 ) -> tuple[str, float]:
     idle = tracker.idle_seconds(now)
     if idle >= idle_threshold:
+        current = time.monotonic() if now is None else now
+        if tracker.last_heartbeat_time is not None and current - tracker.last_heartbeat_time < idle_threshold:
+            return "quiet", idle
         return "stalled", idle
     if tracker.last_activity_time is not None:
         return "working", idle
@@ -371,7 +408,7 @@ async def _typing_keepalive(
     """Send typing every 4s while waiting, except after activity goes stale."""
     while not stop_event.is_set():
         state = _activity_state(activity_tracker)[0] if activity_tracker else "working"
-        if state != "stalled":
+        if state in {"working", "waiting"}:
             try:
                 await update.effective_message.reply_chat_action("typing")
             except Exception:
@@ -385,7 +422,7 @@ async def _typing_keepalive(
 # The manager owns the actual hard deadline. Telegram waits slightly longer so
 # it can deliver the manager's final response or explicit timeout error instead
 # of abandoning a live request first.
-_RESPONSE_TIMEOUT = float(config.CODEX_RESPONSE_TIMEOUT_SECONDS + 60)
+_RESPONSE_TIMEOUT = float(config.CODEX_REQUEST_TIMEOUT_SECONDS + 60)
 
 
 async def _wait_for_response(
@@ -395,11 +432,6 @@ async def _wait_for_response(
     request_id: Optional[str] = None,
 ) -> str:
     """Wait for next response from SessionManager matching this specific request.
-
-    The response queue is a catch-all for anything not routed to a dedicated
-    queue (confirm/permission/tui/proactive/ralph) -- notably any message with
-    a source outside those tags (e.g. "unknown" from a client that didn't set
-    one) lands here too.
 
     Source-only matching is NOT enough: confirmed live (2026-08-23) that a
     same-source message injected outside the normal send/wait cycle (e.g. a
@@ -414,7 +446,11 @@ async def _wait_for_response(
     while True:
         remaining = deadline - asyncio.get_event_loop().time()
         if remaining <= 0:
-            return "⌛ No response in 12 minutes. Claude may be stuck. Send /restart to reset."
+            if hasattr(subscriber, "finish_request"):
+                subscriber.finish_request(source, request_id)
+            minutes = _RESPONSE_TIMEOUT / 60
+            return (f"⌛ No final response within the {minutes:g}-minute request deadline. "
+                    "I stopped sending status updates for this request. Its execution state is unconfirmed.")
         try:
             msg = await asyncio.wait_for(subscriber.get(), timeout=min(remaining, 30.0))
         except asyncio.TimeoutError:
@@ -422,8 +458,8 @@ async def _wait_for_response(
         if msg.get("type") == "activity":
             same_source = msg.get("source") == source
             same_request = request_id is None or msg.get("request_id") == request_id
-            if activity_tracker and msg.get("growing") and same_source and same_request:
-                activity_tracker.mark_activity()
+            if activity_tracker and same_source and same_request:
+                activity_tracker.observe(msg)
             continue
         msg_source = msg.get("source")
         if msg_source != source:
@@ -451,9 +487,8 @@ async def _status_notifier(
     idle_threshold: float = _ACTIVITY_IDLE_THRESHOLD,
 ):
     """
-    Report concise progress for a long turn. A quiet model is not evidence of
-    a crash: the manager now emits explicit heartbeats while its child process
-    is alive and owns the hard timeout/error path.
+    Report phase and actual recent events. Process heartbeats only establish
+    contact; they never reset the meaningful-activity clock.
     """
     try:
         await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=initial_delay)
@@ -465,23 +500,37 @@ async def _status_notifier(
 
     tracker = activity_tracker or ActivityTracker()
     last_report_at = 0.0
-    last_reported_state: Optional[str] = None
+    last_reported_state = None
     while not stop_event.is_set():
         now = time.monotonic()
         state, idle = _activity_state(tracker, now, idle_threshold)
-        should_report = state != last_reported_state or now - last_report_at >= interval
+        signature = (state, tracker.phase)
+        # Quiet/stalled notifications are sent once per transition, not as an
+        # endless series of unsupported "still working" claims.
+        should_report = signature != last_reported_state or (state == "working" and now - last_report_at >= interval)
         if should_report:
             elapsed = int(now - tracker.started_at)
+            phase = {"queued": "Waiting to start", "preparing": "Preparing your request",
+                     "actor": "Checking project actors", "main": "Working on your request"}.get(
+                         tracker.phase, "Processing request")
             if state == "working":
-                status = f"⏳ Axon is working... ({elapsed}s)"
+                status = f"⏳ {phase} ({elapsed}s). Last activity {int(idle)}s ago."
+                if tracker.detail:
+                    status += f" {tracker.detail[:160]}."
+            elif state == "quiet":
+                status = (f"⏸ Last phase: {phase}. No new task activity for {int(idle)}s. "
+                          "The connection is alive, but progress is unconfirmed.")
+            elif state == "stalled":
+                status = (f"⚠️ Last phase: {phase}. No recent activity or heartbeat. "
+                          "I cannot confirm that this request is still running.")
             else:
-                status = f"⏳ Axon is still processing this turn... ({elapsed}s)"
+                status = f"⏳ Waiting for the manager to start this request ({elapsed}s)."
             try:
                 await update.effective_message.reply_text(status)
             except Exception:
                 pass
             last_report_at = now
-            last_reported_state = state
+            last_reported_state = signature
         try:
             await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=2.0)
             return
@@ -517,11 +566,16 @@ async def _handle_and_reply(
             _status_notifier(update, stop_typing, activity_tracker)
         )
 
-        request_id = _send_to_session_manager(text, source, user_id, media_path)
-
+        request_id = None
         try:
+            request_id = _send_to_session_manager(text, source, user_id, media_path)
             raw = await _wait_for_response(subscriber, source, activity_tracker, request_id=request_id)
+        except OSError as exc:
+            log.error("Failed to send to session manager: %s", exc)
+            raw = "Axon is unavailable: delivery to the manager could not be confirmed. I stopped status updates for this request."
         finally:
+            if hasattr(subscriber, "finish_request"):
+                subscriber.finish_request(source, request_id)
             stop_typing.set()
             for t in (typing_task, status_task):
                 t.cancel()

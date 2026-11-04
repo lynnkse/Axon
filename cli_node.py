@@ -66,12 +66,18 @@ class CLINode:
     # ------------------------------------------------------------------
 
     def _get_terminal_size(self) -> tuple[int, int]:
-        try:
-            size = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
-            rows, cols = struct.unpack("HHHH", size)[:2]
-            return rows, cols
-        except Exception:
-            return 24, 80
+        # start_axon.sh pipes stdout through tee; stdin is still the pane's
+        # terminal. Query the actual TTY instead of silently sizing Codex to
+        # 80x24 whenever stdout is a pipe.
+        for stream in (sys.stdin, sys.stdout, sys.stderr):
+            try:
+                size = fcntl.ioctl(stream.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
+                rows, cols = struct.unpack("HHHH", size)[:2]
+                if rows > 0 and cols > 0:
+                    return rows, cols
+            except (OSError, ValueError):
+                continue
+        return 24, 80
 
     def _send_resize(self):
         """Send terminal size to SessionManagerNode as NDJSON on cli_input.sock."""
@@ -203,12 +209,10 @@ class CLINode:
 
 
 if __name__ == "__main__":
-    # The default is a byte-for-byte mirror of Codex's own terminal UI.  It
-    # preserves the native prompt, completion, tool/status output, and keys
-    # such as Tab and Enter.  Keep the compact request/response client as an
-    # explicit opt-in for operational use, rather than silently substituting
-    # it whenever actor handling is enabled.
-    if os.environ.get("AXON_CLI_MODE", "mirror").strip().lower() == "chat":
+    # Routed requests may run in headless Codex exec, not the native PTY.
+    # Default to the correlated live conversation; retain native access as
+    # the explicit AXON_CLI_MODE=mirror operational mode.
+    if config.get("AXON_CLI_MODE", "chat").strip().lower() != "mirror":
         from codex_chat_cli import main as chat_main
         chat_main()
     else:

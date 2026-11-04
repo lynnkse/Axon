@@ -771,10 +771,12 @@ class SessionManagerNode:
         self._publish_tui_prompt(question, choices)
 
     def _publish_tui_prompt(self, question: str, choices: list):
+        context = self._current_response_context()
         payload = json.dumps({
             "type": "tui_prompt",
             "question": question,
             "choices": [{"num": n, "text": t} for n, t in choices],
+            **context,
         }) + "\n"
         payload_bytes = payload.encode()
         with self.response_subs_lock:
@@ -786,6 +788,18 @@ class SessionManagerNode:
                     dead.append(conn)
             for conn in dead:
                 self.response_subscribers.remove(conn)
+
+    def _current_response_context(self) -> dict:
+        """Attach routing identity to non-final events such as prompts."""
+        with self.state_lock:
+            item = self.current_item
+            if item is None:
+                return {}
+            return {
+                "source": item.source,
+                "user_id": item.user_id,
+                "request_id": item.request_id,
+            }
 
     def _publish_activity(self, growing: bool):
         payload = json.dumps({"type": "activity", "growing": growing}) + "\n"
@@ -1675,10 +1689,12 @@ class SessionManagerNode:
         # when the decision arrives.
 
     def _publish_permission_request(self, tool_name: str, tool_input: dict):
+        context = self._current_response_context()
         payload = json.dumps({
             "type": "permission_request",
             "tool_name": tool_name,
             "tool_input": tool_input,
+            **context,
         }) + "\n"
         payload_bytes = payload.encode()
         with self.response_subs_lock:

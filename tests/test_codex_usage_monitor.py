@@ -12,15 +12,26 @@ def actor(state=None):
     }
 
 
-def test_not_due_does_not_read_usage_or_write():
+def test_not_due_does_not_read_usage_or_write_before_two_hours():
     now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
-    row = actor({"last_check_at": (now - timedelta(minutes=59)).isoformat()})
+    row = actor({"last_check_at": (now - timedelta(minutes=119)).isoformat()})
     with patch.object(monitor, "_actor_row", return_value=row), \
          patch.object(monitor.supabase_client, "latest_codex_weekly_usage") as usage, \
          patch.object(monitor.supabase_client, "save_prompt_actor_update") as save:
         assert monitor.check_once(now=now) == "not-due"
     usage.assert_not_called()
     save.assert_not_called()
+
+
+def test_two_hour_boundary_checks_usage():
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    row = actor({"last_check_at": (now - timedelta(hours=2)).isoformat()})
+    with patch.object(monitor, "_actor_row", return_value=row), \
+         patch.object(monitor.supabase_client, "latest_codex_weekly_usage", return_value=(19.0, 123)), \
+         patch.object(monitor.supabase_client, "save_prompt_actor_update", return_value=True) as save:
+        assert monitor.check_once(now=now) == "checked"
+    assert "19% used" in save.call_args.args[1].summary
+    assert "81% remaining" in save.call_args.args[1].summary
 
 
 def test_below_threshold_checks_without_alert():

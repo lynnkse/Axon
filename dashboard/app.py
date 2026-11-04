@@ -8,16 +8,20 @@ import base64
 import json
 import os
 import html
+import re
 import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
+
+from traffic_telemetry import TrafficTelemetry, read_status
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _ENV_PATH = Path(__file__).parent.parent / ".env"
@@ -58,22 +62,37 @@ MR_BSP_PAPER_PDF = (
     / "mr-bsp-simplification/papers/2025-IJRR-resubmission2/root.pdf"
 )
 CV_PDF = Path.home() / "cv/Anton_Gulyaev_CV.pdf"
+ELECTRICITY_TABLES_PDF = Path(__file__).parent / "assets/electricity_tables_russian.pdf"
 
 
-def _sb_get(table: str, params: str = "") -> list:
+@st.cache_data(ttl=120, max_entries=256, show_spinner=False)
+def _sb_get_cached(table: str, params: str) -> tuple[list, str | None]:
+    """Fetch one REST result. Streamlit caches identical reads for two minutes."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return []
+        return [], "Supabase is not configured"
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{table}?{params}"
     req = urllib.request.Request(url, headers={
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     })
+    started = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read().decode())
-    except Exception as e:
-        st.error(f"Supabase error: {e}")
-        return []
+        with urllib.request.urlopen(req, timeout=8) as response:
+            raw = response.read()
+        TRAFFIC.record_network(table, params, len(raw), int((time.monotonic() - started) * 1000), True)
+        return json.loads(raw.decode()), None
+    except Exception as exc:
+        TRAFFIC.record_network(table, params, 0, int((time.monotonic() - started) * 1000), False)
+        return [], str(exc)
+
+
+def _sb_get(table: str, params: str = "") -> list:
+    """Return cached dashboard data and record the rendered query metadata."""
+    rows, error = _sb_get_cached(table, params)
+    TRAFFIC.record_query(_TRAFFIC_RUN, table, params, rows)
+    if error:
+        st.error(f"Supabase error: {error}")
+    return rows
 
 
 def _badge(text: str, color: str = "#4A90D9") -> str:
@@ -90,6 +109,111 @@ def _compact_state(state: dict, limit: int = 8) -> list[tuple[str, object]]:
             continue
         scalars.append((key, value))
     return scalars[:limit]
+
+
+def _experiment_number(name: object) -> int | None:
+    """Return the displayed experiment number, if the title has one."""
+    match = re.search(r"\bExperiment\s+(\d+)\b", str(name or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _experiment_motivation(experiment: dict, limit: int = 190) -> str:
+    """Use the recorded opening description as the edge explanation."""
+    description = " ".join(str(experiment.get("description") or "").split())
+    if not description:
+        return "Next recorded experiment"
+    first_sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0]
+    if len(first_sentence) > limit:
+        first_sentence = first_sentence[: limit - 1].rstrip() + "…"
+    return first_sentence
+
+
+def _experiment_graph(experiments: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Build conservative edges from explicit Experiment-N references.
+
+    If a row does not name a prior experiment, connect it to the immediately
+    preceding recorded row and label that fallback honestly. This keeps gaps in
+    the historical table visible instead of inventing missing experiments.
+    """
+    nodes = []
+    by_number = {}
+    for index, experiment in enumerate(experiments):
+        number = _experiment_number(experiment.get("name"))
+        node_id = f"experiment_{index}"
+        node = {"id": node_id, "number": number, "experiment": experiment}
+        nodes.append(node)
+        if number is not None:
+            by_number[number] = node
+
+    edges = []
+    for index, node in enumerate(nodes):
+        if index == 0:
+            continue
+        experiment = node["experiment"]
+        relationship_text = " ".join(
+            str(experiment.get(field) or "") for field in ("description", "notes")
+        )
+        explicit_numbers = []
+        for raw_number in re.findall(
+            r"\bExperiment\s+(\d+)\b", relationship_text, re.IGNORECASE
+        ):
+            number = int(raw_number)
+            predecessor = by_number.get(number)
+            if (
+                predecessor
+                and nodes.index(predecessor) < index
+                and number not in explicit_numbers
+            ):
+                explicit_numbers.append(number)
+
+        predecessors = [by_number[number] for number in explicit_numbers[-3:]]
+        inferred = not predecessors
+        if inferred:
+            predecessors = [nodes[index - 1]]
+        for predecessor in predecessors:
+            edges.append({
+                "from": predecessor,
+                "to": node,
+                "reason": (
+                    "Recorded next; no explicit predecessor is named. "
+                    + _experiment_motivation(experiment)
+                    if inferred else _experiment_motivation(experiment)
+                ),
+                "inferred": inferred,
+            })
+    return nodes, edges
+
+
+def _dot_escape(value: object) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _experiment_graph_dot(nodes: list[dict], edges: list[dict]) -> str:
+    lines = [
+        "digraph experiments {",
+        'graph [rankdir="TB", bgcolor="transparent", pad="0.25", nodesep="0.25", ranksep="0.55"];',
+        'node [shape="box", style="rounded,filled", fillcolor="#17233a", color="#5f7aa6", fontcolor="#f2f5fa", fontname="Arial", fontsize="10", margin="0.12,0.08"];',
+        'edge [color="#8097bb", fontcolor="#aebbd0", fontname="Arial", fontsize="8", arrowsize="0.7"];',
+    ]
+    for node in nodes:
+        name = str(node["experiment"].get("name") or "Untitled experiment")
+        number = node.get("number")
+        title = name.split("--", 1)[-1].strip() if "--" in name else name
+        if len(title) > 54:
+            title = title[:53].rstrip() + "…"
+        label = f"Experiment {number}\n{title}" if number is not None else title
+        lines.append(f'{node["id"]} [label="{_dot_escape(label)}"];')
+    for edge in edges:
+        reason = edge["reason"]
+        if len(reason) > 88:
+            reason = reason[:87].rstrip() + "…"
+        style = ', style="dashed"' if edge["inferred"] else ""
+        lines.append(
+            f'{edge["from"]["id"]} -> {edge["to"]["id"]} '
+            f'[label="{_dot_escape(reason)}"{style}];'
+        )
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def _actor_display_name(actor_id: str, actor_type: str) -> str:
@@ -573,9 +697,28 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_food, tab_fitness, tab_alive, tab_anton, tab_actors, tab_projects, tab_architecture, tab_cli, tab_cv, tab_files, tab_manim, tab_database, tab_ailin = st.tabs(
-    ["🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors", "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📑 CV", "📄 Files", "🎬 Manim", "◈ Database", "🧬 Ailin"]
-)
+_DASHBOARD_SECTIONS = [
+    "🍽 Food Today", "💪 Fitness Week", "🧠 Alive State", "🥋 Anton State", "🎭 Actors",
+    "🧭 Projects", "🗺 Architecture", "🖥 CLI", "📑 CV", "📄 Files", "🎬 Manim",
+    "◈ Database", "🧬 Ailin",
+]
+# st.tabs evaluates every tab body on each rerun. A radio selector renders only the
+# requested section, avoiding hidden PDF/image payloads and unrelated Supabase reads.
+active_section = st.radio("Dashboard section", _DASHBOARD_SECTIONS, horizontal=True,
+                         label_visibility="collapsed", key="axon_dashboard_section")
+if "traffic_session_id" not in st.session_state:
+    st.session_state["traffic_session_id"] = os.urandom(12).hex()
+TRAFFIC = TrafficTelemetry(Path(__file__).parent / "logs")
+_TRAFFIC_RUN = TRAFFIC.start_run(st.session_state["traffic_session_id"], active_section)
+_traffic_status = read_status(Path(__file__).parent / "logs")
+if _traffic_status:
+    st.caption(
+        "Traffic monitor (24 h): "
+        f"{_traffic_status.get('dashboard_runs', 0)} dashboard runs · "
+        f"{_traffic_status.get('supabase_requests', 0)} Supabase requests · "
+        f"{_traffic_status.get('supabase_response_megabytes', 0):.3f} MB response data · "
+        f"status: {_traffic_status.get('status', 'starting')}"
+    )
 
 AILIN_DIR = Path.home() / "ailin"
 
@@ -588,6 +731,8 @@ def _render_pdf(full_path: Path, height: int = 900, download_key=None):
     """Render a PDF with the browser's scrollable viewer and a download fallback."""
     pdf_bytes = full_path.read_bytes()
     pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    # This is the payload embedded into the visible browser frame, not a Supabase egress count.
+    TRAFFIC.record_inline_asset(_TRAFFIC_RUN, "inline_pdf", full_path.name, len(pdf_b64))
     st.iframe(
         f"data:application/pdf;base64,{pdf_b64}#toolbar=1&navpanes=0&view=FitH",
         width="stretch",
@@ -626,7 +771,7 @@ def _render_file(full_path: Path, height: int = 700):
         st.video(str(full_path))
 
 # ── Tab: Food Today ───────────────────────────────────────────────────────────
-with tab_food:
+if active_section == '🍽 Food Today':
     st.subheader(f"Food — {date.today().isoformat()}")
     today = date.today().isoformat()
     rows = _sb_get("food_entries", f"date=eq.{today}&order=id.asc&select=food_item,portion,calories,protein_g,fat_g,carbs_g,notes")
@@ -676,7 +821,7 @@ with tab_food:
         st.rerun()
 
 # ── Tab: Fitness Week ─────────────────────────────────────────────────────────
-with tab_fitness:
+if active_section == '💪 Fitness Week':
     st.subheader("Fitness — last 7 days")
     week_ago = (date.today() - timedelta(days=7)).isoformat()
     rows = _sb_get("fitness_log", f"date=gte.{week_ago}&order=date.desc&select=date,weight_kg,pushups_sets,pushups_reps,pullups_sets,pullups_reps,pistol_sets,pistol_reps,notes")
@@ -708,7 +853,7 @@ with tab_fitness:
         st.rerun()
 
 # ── Tab: Alive State ──────────────────────────────────────────────────────────
-with tab_alive:
+if active_section == '🧠 Alive State':
     st.subheader("Live Module State")
     rows = _sb_get("alive_state", "id=eq.1&limit=1")
     if rows:
@@ -749,7 +894,7 @@ with tab_alive:
         st.rerun()
 
 # ── Tab: Anton State ──────────────────────────────────────────────────────────
-with tab_anton:
+if active_section == '🥋 Anton State':
     st.markdown(
         '<div class="dojo-shell"><div class="dojo-eyebrow">Discipline telemetry · cyber dojo</div>'
         '<div class="dojo-title">Anton State 道</div>'
@@ -922,7 +1067,7 @@ with tab_anton:
         st.rerun()
 
 # ── Tab: Actors ───────────────────────────────────────────────────────────────
-with tab_actors:
+if active_section == '🎭 Actors':
     st.subheader("Axon Updates")
     st.caption(
         "Persistent workers shared across Axon instances. Each card explains what the "
@@ -1016,9 +1161,21 @@ with tab_actors:
         st.rerun()
 
 # ── Tab: Ongoing Projects ─────────────────────────────────────────────────────
-with tab_projects:
+if active_section == '🧭 Projects':
     st.subheader("Ongoing Projects")
     st.caption("Anton's current work areas as cognitive threads. Open a project to inspect its recent accumulated insight history.")
+
+    # Keep the requested invoice PDF visible without requiring the user to
+    # open a project and enable its deferred-detail checkbox first.
+    if ELECTRICITY_TABLES_PDF.is_file():
+        with st.expander("⬇ Скачать таблицы электричества · PDF", expanded=True):
+            st.caption("Две страницы · Rabbi Akiva 8 и Herzl 94 · только Даты, КВт, Сумма")
+            _render_pdf(
+                ELECTRICITY_TABLES_PDF,
+                height=760,
+                download_key="electricity_tables_russian_projects_top",
+            )
+
     projects = _sb_get(
         "projects",
         "order=status.asc,name.asc&select=id,name,status,domain,description,started_at,metadata",
@@ -1046,255 +1203,352 @@ with tab_projects:
                     unsafe_allow_html=True,
                 )
 
-                stages = (project.get("metadata") or {}).get("stages")
-                if isinstance(stages, list):
-                    valid_stages = [s for s in stages if isinstance(s, dict)]
-                    if valid_stages:
-                        cols = st.columns(len(valid_stages))
-                        for index, (col, stage) in enumerate(zip(cols, valid_stages)):
-                            stage_status = stage.get("status", "planned")
-                            marker = "✓" if stage_status == "done" else "○" if stage_status == "planned" else "◐"
-                            stage_name = str(stage.get("name") or f"Stage {index + 1}")
-                            short_label = stage_name if len(stage_name) <= 18 else stage_name[:16] + "…"
-                            with col:
-                                with st.popover(f"{marker} {short_label}", use_container_width=True):
-                                    st.markdown(f"**{stage_name}**")
-                                    detail = stage.get("detail")
-                                    if detail:
-                                        st.markdown(str(detail))
-                                    else:
-                                        st.caption("No stage detail recorded yet.")
+                details_key = f"project_details_{project_id}"
+                load_details = st.checkbox(
+                    "Load project details, documents, and experiment map",
+                    key=details_key,
+                    help="Loads additional Supabase data and, where present, browser-bound PDF/map assets.",
+                )
+                if not load_details:
+                    st.caption("Details are deferred to avoid loading every project on each dashboard refresh.")
+                else:
+                    stages = (project.get("metadata") or {}).get("stages")
+                    if isinstance(stages, list):
+                        valid_stages = [s for s in stages if isinstance(s, dict)]
+                        if valid_stages:
+                            cols = st.columns(len(valid_stages))
+                            for index, (col, stage) in enumerate(zip(cols, valid_stages)):
+                                stage_status = stage.get("status", "planned")
+                                marker = "✓" if stage_status == "done" else "○" if stage_status == "planned" else "◐"
+                                stage_name = str(stage.get("name") or f"Stage {index + 1}")
+                                short_label = stage_name if len(stage_name) <= 18 else stage_name[:16] + "…"
+                                with col:
+                                    with st.popover(f"{marker} {short_label}", use_container_width=True):
+                                        st.markdown(f"**{stage_name}**")
+                                        detail = stage.get("detail")
+                                        if detail:
+                                            st.markdown(str(detail))
+                                        else:
+                                            st.caption("No stage detail recorded yet.")
 
-                proj_metadata = project.get("metadata") or {}
+                    proj_metadata = project.get("metadata") or {}
 
-                if name == "MR-BSP-Paper":
-                    with st.expander("📖 Current manuscript PDF", expanded=True):
-                        if MR_BSP_PAPER_PDF.is_file():
-                            modified_at = datetime.fromtimestamp(
-                                MR_BSP_PAPER_PDF.stat().st_mtime
-                            ).astimezone()
-                            st.caption(
-                                "Live compiled manuscript · updated "
-                                + modified_at.strftime("%Y-%m-%d %H:%M:%S %Z")
-                            )
-                            _render_pdf(
-                                MR_BSP_PAPER_PDF,
-                                height=900,
-                                download_key=f"project_manuscript_{project_id}",
-                            )
-                        else:
-                            st.warning(
-                                "Compiled manuscript not found. Build root.tex to create root.pdf."
-                            )
-
-                project_documents = proj_metadata.get("documents")
-                if isinstance(project_documents, list):
-                    valid_documents = [
-                        document for document in project_documents
-                        if isinstance(document, dict) and document.get("path")
-                    ]
-                    if valid_documents:
-                        with st.expander(
-                                f"📄 Reference documents · {len(valid_documents)}",
-                                expanded=False):
-                            docs_root = DOCS_DIR.resolve()
-                            for document_index, document in enumerate(valid_documents):
-                                raw_path = Path(str(document["path"]))
-                                document_path = (
-                                    raw_path.resolve() if raw_path.is_absolute()
-                                    else (docs_root / raw_path).resolve()
+                    if name == "MR-BSP-Paper":
+                        with st.expander("📖 Current manuscript PDF", expanded=True):
+                            if MR_BSP_PAPER_PDF.is_file():
+                                modified_at = datetime.fromtimestamp(
+                                    MR_BSP_PAPER_PDF.stat().st_mtime
+                                ).astimezone()
+                                st.caption(
+                                    "Live compiled manuscript · updated "
+                                    + modified_at.strftime("%Y-%m-%d %H:%M:%S %Z")
                                 )
-                                try:
-                                    document_path.relative_to(docs_root)
-                                except ValueError:
-                                    st.warning("Document path is outside the dashboard directory.")
-                                    continue
+                                _render_pdf(
+                                    MR_BSP_PAPER_PDF,
+                                    height=900,
+                                    download_key=f"project_manuscript_{project_id}",
+                                )
+                            else:
+                                st.warning(
+                                    "Compiled manuscript not found. Build root.tex to create root.pdf."
+                                )
 
-                                title = str(document.get("title") or document_path.name)
-                                st.markdown(f"**{title}**")
-                                if document.get("description"):
-                                    st.caption(str(document["description"]))
-                                if not document_path.is_file():
-                                    st.warning(f"Document not found: {document_path.name}")
-                                    continue
+                    if "irina" in name.lower() or "utility" in name.lower():
+                        with st.expander("⚡ Electricity invoice tables", expanded=True):
+                            if ELECTRICITY_TABLES_PDF.is_file():
+                                st.caption("Invoice-only data · two tables · Russian column labels")
+                                _render_pdf(
+                                    ELECTRICITY_TABLES_PDF,
+                                    height=760,
+                                    download_key=f"irina_electricity_tables_{project_id}",
+                                )
+                            else:
+                                st.warning("The electricity tables PDF is not available yet.")
 
-                                if document_path.suffix.lower() == ".pdf":
-                                    _render_pdf(
-                                        document_path,
-                                        height=760,
-                                        download_key=(
-                                            f"project_document_{project_id}_{document_index}"
-                                        ),
+                    project_documents = proj_metadata.get("documents")
+                    if isinstance(project_documents, list):
+                        valid_documents = [
+                            document for document in project_documents
+                            if isinstance(document, dict) and document.get("path")
+                        ]
+                        if valid_documents:
+                            with st.expander(
+                                    f"📄 Reference documents · {len(valid_documents)}",
+                                    expanded=False):
+                                docs_root = DOCS_DIR.resolve()
+                                for document_index, document in enumerate(valid_documents):
+                                    raw_path = Path(str(document["path"]))
+                                    document_path = (
+                                        raw_path.resolve() if raw_path.is_absolute()
+                                        else (docs_root / raw_path).resolve()
                                     )
-                                else:
-                                    st.download_button(
-                                        "⬇ Download document",
-                                        document_path.read_bytes(),
-                                        file_name=document_path.name,
-                                        mime="application/octet-stream",
-                                        key=f"project_document_{project_id}_{document_index}",
-                                    )
-                                source = document.get("source")
-                                if source:
-                                    source_path = (docs_root / str(source)).resolve()
                                     try:
-                                        source_path.relative_to(docs_root)
+                                        document_path.relative_to(docs_root)
                                     except ValueError:
-                                        source_path = None
-                                    if source_path and source_path.is_file():
-                                        st.download_button(
-                                            "⬇ Download LaTeX source",
-                                            source_path.read_bytes(),
-                                            file_name=source_path.name,
-                                            mime="application/x-tex",
-                                            key=f"project_document_source_{project_id}_{document_index}",
+                                        st.warning("Document path is outside the dashboard directory.")
+                                        continue
+
+                                    title = str(document.get("title") or document_path.name)
+                                    st.markdown(f"**{title}**")
+                                    if document.get("description"):
+                                        st.caption(str(document["description"]))
+                                    if not document_path.is_file():
+                                        st.warning(f"Document not found: {document_path.name}")
+                                        continue
+
+                                    if document_path.suffix.lower() == ".pdf":
+                                        _render_pdf(
+                                            document_path,
+                                            height=760,
+                                            download_key=(
+                                                f"project_document_{project_id}_{document_index}"
+                                            ),
                                         )
+                                    else:
+                                        st.download_button(
+                                            "⬇ Download document",
+                                            document_path.read_bytes(),
+                                            file_name=document_path.name,
+                                            mime="application/octet-stream",
+                                            key=f"project_document_{project_id}_{document_index}",
+                                        )
+                                    source = document.get("source")
+                                    if source:
+                                        source_path = (docs_root / str(source)).resolve()
+                                        try:
+                                            source_path.relative_to(docs_root)
+                                        except ValueError:
+                                            source_path = None
+                                        if source_path and source_path.is_file():
+                                            st.download_button(
+                                                "⬇ Download LaTeX source",
+                                                source_path.read_bytes(),
+                                                file_name=source_path.name,
+                                                mime="application/x-tex",
+                                                key=f"project_document_source_{project_id}_{document_index}",
+                                            )
 
-                open_issues = proj_metadata.get("open_issues")
-                if isinstance(open_issues, list):
-                    valid_issues = [issue for issue in open_issues if isinstance(issue, dict)]
-                    if valid_issues:
-                        st.markdown(f"##### Open issues · {len(valid_issues)}")
-                        issue_rows = []
-                        for index, issue in enumerate(valid_issues):
-                            issue_number = issue.get("issue", index + 1)
-                            issue_status = str(issue.get("status") or "open")
-                            issue_source = str(issue.get("source") or "unspecified")
-                            summary = " ".join(str(issue.get("summary") or "No summary recorded.").split())
-                            short_summary = summary if len(summary) <= 130 else summary[:127].rstrip() + "…"
-                            issue_rows.append({
-                                "#": issue_number,
-                                "Status": issue_status,
-                                "Issue": short_summary,
-                                "Source": issue_source,
+                    open_issues = proj_metadata.get("open_issues")
+                    if isinstance(open_issues, list):
+                        valid_issues = [issue for issue in open_issues if isinstance(issue, dict)]
+                        if valid_issues:
+                            st.markdown(f"##### Open issues · {len(valid_issues)}")
+                            issue_rows = []
+                            for index, issue in enumerate(valid_issues):
+                                issue_number = issue.get("issue", index + 1)
+                                issue_status = str(issue.get("status") or "open")
+                                issue_source = str(issue.get("source") or "unspecified")
+                                summary = " ".join(str(issue.get("summary") or "No summary recorded.").split())
+                                short_summary = summary if len(summary) <= 130 else summary[:127].rstrip() + "…"
+                                issue_rows.append({
+                                    "#": issue_number,
+                                    "Status": issue_status,
+                                    "Issue": short_summary,
+                                    "Source": issue_source,
+                                })
+
+                            st.dataframe(
+                                issue_rows,
+                                width="stretch",
+                                hide_index=True,
+                                height=min(650, 38 + len(issue_rows) * 35),
+                                column_config={
+                                    "#": st.column_config.NumberColumn("#", width="small"),
+                                    "Status": st.column_config.TextColumn("Status", width="medium"),
+                                    "Issue": st.column_config.TextColumn("Issue", width="large"),
+                                    "Source": st.column_config.TextColumn("Source", width="medium"),
+                                },
+                            )
+
+                            selected_issue_index = st.selectbox(
+                                "Issue details",
+                                options=list(range(len(valid_issues))),
+                                format_func=lambda issue_index: (
+                                    f"Issue {valid_issues[issue_index].get('issue', issue_index + 1)} · "
+                                    f"{issue_rows[issue_index]['Issue']}"
+                                ),
+                                key=f"project_issue_details_{project_id}",
+                            )
+                            selected_issue = valid_issues[selected_issue_index]
+                            st.markdown(selected_issue.get("summary") or "No summary recorded.")
+                            st.caption(
+                                f"Status: {selected_issue.get('status') or 'open'} · "
+                                f"Source: {selected_issue.get('source') or 'unspecified'}"
+                            )
+
+                    dynamics = proj_metadata.get("dynamics_table")
+                    if isinstance(dynamics, dict) and dynamics.get("rows"):
+                        with st.expander(f"📊 {dynamics.get('title', 'Dynamics')}", expanded=False):
+                            st.dataframe(
+                                dynamics["rows"], use_container_width=True, hide_index=True,
+                                column_config={col: st.column_config.Column(col) for col in (dynamics.get("columns") or [])},
+                            )
+                            if dynamics.get("note"):
+                                st.caption(dynamics["note"])
+
+                    experiments = _sb_get(
+                        "project_experiments",
+                        f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=sequence.asc"
+                        "&select=id,sequence,name,description,data_source,results_table,dynamics_table,diagrams,notes",
+                    )
+                    if experiments:
+                        import importlib
+                        import experiment_map
+                        render_map = importlib.reload(experiment_map).render_map
+                        # Keep the complete experiment record usable even when the
+                        # graph is large or the browser does not render its iframe.
+                        # In particular, a live campaign must never be discoverable
+                        # only through the dependency-map visualisation.
+                        ordered_experiments = sorted(
+                            experiments,
+                            key=lambda experiment: (
+                                _experiment_number(experiment.get("name")) is None,
+                                _experiment_number(experiment.get("name")) or 0,
+                                str(experiment.get("name") or ""),
+                            ),
+                        )
+                        st.markdown(f"##### Experiments · {len(ordered_experiments)} recorded")
+
+                        def _experiment_source(experiment: dict) -> dict:
+                            source = experiment.get("data_source")
+                            return source if isinstance(source, dict) else {}
+
+                        active_experiments = [
+                            experiment for experiment in ordered_experiments
+                            if "running" in str(_experiment_source(experiment).get("state", "")).lower()
+                            or "running" in str(experiment.get("name") or "").lower()
+                        ]
+                        for experiment in active_experiments:
+                            source = _experiment_source(experiment)
+                            st.info(
+                                f"Live campaign: **{experiment.get('name')}** · "
+                                f"{source.get('completed_successful', 0)}/{source.get('expected_cells', '?')} successful · "
+                                f"{source.get('running', 0)} running · "
+                                f"{source.get('idle_or_queued', 0)} queued/idle · "
+                                f"updated {source.get('snapshot_local_time', 'unknown')}"
+                            )
+
+                        catalog_rows = []
+                        for experiment in ordered_experiments:
+                            source = _experiment_source(experiment)
+                            catalog_rows.append({
+                                "#": experiment.get("sequence") or _experiment_number(experiment.get("name")),
+                                "Experiment": experiment.get("name") or "Untitled experiment",
+                                "State": source.get("state") or "recorded",
+                                "Summary": _experiment_motivation(experiment, limit=230),
                             })
-
                         st.dataframe(
-                            issue_rows,
+                            catalog_rows,
                             width="stretch",
                             hide_index=True,
-                            height=min(650, 38 + len(issue_rows) * 35),
+                            height=min(900, 38 + len(catalog_rows) * 35),
                             column_config={
                                 "#": st.column_config.NumberColumn("#", width="small"),
-                                "Status": st.column_config.TextColumn("Status", width="medium"),
-                                "Issue": st.column_config.TextColumn("Issue", width="large"),
-                                "Source": st.column_config.TextColumn("Source", width="medium"),
+                                "Experiment": st.column_config.TextColumn("Experiment", width="large"),
+                                "State": st.column_config.TextColumn("State", width="medium"),
+                                "Summary": st.column_config.TextColumn("Summary", width="large"),
                             },
                         )
 
-                        selected_issue_index = st.selectbox(
-                            "Issue details",
-                            options=list(range(len(valid_issues))),
-                            format_func=lambda issue_index: (
-                                f"Issue {valid_issues[issue_index].get('issue', issue_index + 1)} · "
-                                f"{issue_rows[issue_index]['Issue']}"
+                        selected_experiment_index = st.selectbox(
+                            "Open an experiment record",
+                            options=list(range(len(ordered_experiments))),
+                            index=next(
+                                (index for index, experiment in enumerate(ordered_experiments)
+                                 if _experiment_number(experiment.get("name")) == 49),
+                                len(ordered_experiments) - 1,
                             ),
-                            key=f"project_issue_details_{project_id}",
+                            format_func=lambda index: str(ordered_experiments[index].get("name") or "Untitled experiment"),
+                            key=f"project_experiment_record_{project_id}",
                         )
-                        selected_issue = valid_issues[selected_issue_index]
-                        st.markdown(selected_issue.get("summary") or "No summary recorded.")
-                        st.caption(
-                            f"Status: {selected_issue.get('status') or 'open'} · "
-                            f"Source: {selected_issue.get('source') or 'unspecified'}"
-                        )
-
-                dynamics = proj_metadata.get("dynamics_table")
-                if isinstance(dynamics, dict) and dynamics.get("rows"):
-                    with st.expander(f"📊 {dynamics.get('title', 'Dynamics')}", expanded=False):
-                        st.dataframe(
-                            dynamics["rows"], use_container_width=True, hide_index=True,
-                            column_config={col: st.column_config.Column(col) for col in (dynamics.get("columns") or [])},
-                        )
-                        if dynamics.get("note"):
-                            st.caption(dynamics["note"])
-
-                experiments = _sb_get(
-                    "project_experiments",
-                    f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=sequence.asc"
-                    "&select=id,name,description,data_source,results_table,dynamics_table,diagrams,notes",
-                )
-                for experiment in experiments:
-                    exp_name = experiment.get("name") or "Untitled experiment"
-                    with st.expander(f"🧪 {exp_name}", expanded=False):
-                        if experiment.get("description"):
-                            st.markdown(experiment["description"])
-
-                        exp_source = experiment.get("data_source")
-                        if isinstance(exp_source, dict) and exp_source.get("path"):
-                            st.markdown(
-                                f'<div class="memory-block" style="font-family: monospace; font-size: 0.85em;">'
-                                f'📁 <strong>Data source:</strong> {html.escape(exp_source["path"])}'
-                                + (f'<div class="memory-meta">{html.escape(exp_source["note"])}</div>' if exp_source.get("note") else "")
-                                + '</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                        exp_table = experiment.get("results_table")
-                        if isinstance(exp_table, dict) and exp_table.get("rows"):
-                            st.markdown(f"##### {exp_table.get('title', 'Results')}")
-                            columns = exp_table.get("columns") or []
-                            st.dataframe(
-                                [dict(zip(columns, row)) for row in exp_table["rows"]],
-                                use_container_width=True, hide_index=True,
-                            )
-                            if exp_table.get("note"):
-                                st.caption(exp_table["note"])
-
-                        exp_dynamics = experiment.get("dynamics_table")
-                        if isinstance(exp_dynamics, dict) and exp_dynamics.get("rows"):
-                            st.markdown(f"##### {exp_dynamics.get('title', 'Dynamics')}")
-                            columns = exp_dynamics.get("columns") or []
-                            st.dataframe(
-                                [dict(zip(columns, row)) for row in exp_dynamics["rows"]],
-                                use_container_width=True, hide_index=True,
-                                column_config={col: st.column_config.Column(col) for col in columns},
-                            )
-                            if exp_dynamics.get("note"):
-                                st.caption(exp_dynamics["note"])
-
-                        exp_diagrams = experiment.get("diagrams")
-                        if isinstance(exp_diagrams, list) and exp_diagrams:
-                            cols_per_row = 2
-                            for row_start in range(0, len(exp_diagrams), cols_per_row):
-                                row_diagrams = exp_diagrams[row_start:row_start + cols_per_row]
-                                cols = st.columns(cols_per_row)
-                                for col, diagram in zip(cols, row_diagrams):
-                                    if isinstance(diagram, dict) and diagram.get("url"):
-                                        with col:
-                                            st.image(diagram["url"], caption=diagram.get("caption") or "", use_container_width=True)
-
-                        if experiment.get("notes"):
-                            st.caption(experiment["notes"])
-
-                insights = _sb_get(
-                    "insights",
-                    f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=created_at.desc&limit=50"
-                    "&select=id,type,content,confidence,source,context,created_at",
-                )
-                st.markdown(f"##### Recent history · {len(insights)} insight{'s' if len(insights) != 1 else ''}")
-                if insights:
-                    for insight in insights:
-                        insight_type = insight.get("type") or "insight"
-                        confidence = insight.get("confidence")
+                        selected_experiment = ordered_experiments[selected_experiment_index]
                         with st.container(border=True):
-                            labels = (
-                                f'<div class="insight-label-row">'
-                                f'<span class="insight-label">{html.escape(str(insight_type))}</span>'
-                                f'<span class="insight-label secondary">'
-                                f'{html.escape(str(insight.get("created_at") or "unknown date"))}</span>'
+                            st.markdown(f"**{selected_experiment.get('name') or 'Untitled experiment'}**")
+                            st.markdown(selected_experiment.get("description") or "No description recorded.")
+                            selected_results = selected_experiment.get("results_table")
+                            if isinstance(selected_results, dict) and selected_results.get("rows"):
+                                st.markdown(f"###### {selected_results.get('title', 'Results')}")
+                                st.dataframe(selected_results["rows"], width="stretch", hide_index=True)
+                                if selected_results.get("note"):
+                                    st.caption(str(selected_results["note"]))
+                            selected_dynamics = selected_experiment.get("dynamics_table")
+                            if isinstance(selected_dynamics, dict) and selected_dynamics.get("rows"):
+                                st.markdown(f"###### {selected_dynamics.get('title', 'Campaign progress')}")
+                                st.dataframe(selected_dynamics["rows"], width="stretch", hide_index=True)
+                                if selected_dynamics.get("note"):
+                                    st.caption(str(selected_dynamics["note"]))
+
+                            # Persisted evidence entries attach campaign analyses and
+                            # source-backed figures to an existing experiment record.
+                            selected_evidence = selected_experiment.get("diagrams")
+                            if isinstance(selected_evidence, list) and selected_evidence:
+                                st.markdown("###### Experiment evidence")
+                                for evidence in selected_evidence:
+                                    if not isinstance(evidence, dict):
+                                        continue
+                                    title = evidence.get("title")
+                                    if title:
+                                        st.markdown(f"**{title}**")
+                                    body = evidence.get("body")
+                                    if body:
+                                        st.markdown(str(body))
+                                    rows = evidence.get("rows")
+                                    if isinstance(rows, list) and rows:
+                                        st.dataframe(rows, width="stretch", hide_index=True)
+                                    image_path = evidence.get("path")
+                                    if image_path:
+                                        asset_path = Path(str(image_path))
+                                        if asset_path.is_file():
+                                            st.image(str(asset_path), width="stretch")
+                                        else:
+                                            st.caption(f"Evidence asset unavailable on this host: {asset_path}")
+                                    if evidence.get("caption"):
+                                        st.caption(str(evidence["caption"]))
+                            if selected_experiment.get("notes"):
+                                st.caption(str(selected_experiment["notes"]))
+
+                        # The dependency graph contains embedded review figures and
+                        # can be several megabytes. It remains available, but no
+                        # longer hides the catalog behind a slow iframe.
+                        with st.expander("Experiment dependency map", expanded=False):
+                            map_html = render_map(ordered_experiments, project.get("name", ""))
+                            TRAFFIC.record_inline_asset(
+                                _TRAFFIC_RUN,
+                                "experiment_map",
+                                "project_experiment_map",
+                                len(map_html.encode("utf-8")),
                             )
-                            if confidence is not None:
-                                labels += (
-                                    f'<span class="insight-label secondary">confidence '
-                                    f'{html.escape(str(confidence))}</span>'
+                            components.html(map_html, height=800, scrolling=True)
+
+                    insights = _sb_get(
+                        "insights",
+                        f"project_id=eq.{urllib.parse.quote(str(project_id), safe='')}&order=created_at.desc&limit=50"
+                        "&select=id,type,content,confidence,source,context,created_at",
+                    )
+                    st.markdown(f"##### Recent history · {len(insights)} insight{'s' if len(insights) != 1 else ''}")
+                    if insights:
+                        for insight in insights:
+                            insight_type = insight.get("type") or "insight"
+                            confidence = insight.get("confidence")
+                            with st.container(border=True):
+                                labels = (
+                                    f'<div class="insight-label-row">'
+                                    f'<span class="insight-label">{html.escape(str(insight_type))}</span>'
+                                    f'<span class="insight-label secondary">'
+                                    f'{html.escape(str(insight.get("created_at") or "unknown date"))}</span>'
                                 )
-                            labels += '</div>'
-                            st.markdown(labels, unsafe_allow_html=True)
-                            st.markdown(insight.get("content") or "")
-                            if insight.get("context"):
-                                st.caption(f"Context: {insight['context']}")
-                else:
-                    st.caption("No linked insights yet.")
+                                if confidence is not None:
+                                    labels += (
+                                        f'<span class="insight-label secondary">confidence '
+                                        f'{html.escape(str(confidence))}</span>'
+                                    )
+                                labels += '</div>'
+                                st.markdown(labels, unsafe_allow_html=True)
+                                st.markdown(insight.get("content") or "")
+                                if insight.get("context"):
+                                    st.caption(f"Context: {insight['context']}")
+                    else:
+                        st.caption("No linked insights yet.")
     else:
         st.info("No projects found.")
 
@@ -1306,7 +1560,7 @@ with tab_projects:
 # 2026-08-11, then implemented here on ROG rather than letting Codex write the
 # dashboard file directly -- keeps the actual write path on this side per the
 # Reasoner/Executor split worked out earlier this session.
-with tab_architecture:
+if active_section == '🗺 Architecture':
     st.subheader("Axon Architecture")
     st.caption("Deployed relay views plus the corrected prompt-embedded actor design. No actor timers, polling, background process, or separate actor LLM calls.")
 
@@ -1755,7 +2009,7 @@ the exact same hook methods on its own side, reusing this same mechanism rather 
         )
 
 # ── Tab: CLI ────────────────────────────────────────────────────────────────
-with tab_cli:
+if active_section == '🖥 CLI':
     st.subheader("🖥 CLI — live terminal")
     st.caption(
         "Connects straight to SessionManagerNode's display/input sockets — "
@@ -1792,19 +2046,23 @@ with tab_cli:
           term.open(document.getElementById('axon-cli-term'));
           fitAddon.fit();
 
-          const ws = new WebSocket('ws://{_cli_host}:{_cli_bridge_port}');
-          ws.binaryType = 'arraybuffer';
-
-          ws.onopen = () => {{
-            term.write('\\r\\n\\x1b[90m[connected]\\x1b[0m\\r\\n');
-            sendResize();
-          }};
-          ws.onclose = () => term.write('\\r\\n\\x1b[90m[disconnected]\\x1b[0m\\r\\n');
-          ws.onerror = () => term.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n');
-          ws.onmessage = (ev) => {{
-            const data = new Uint8Array(ev.data);
-            term.write(data);
-          }};
+          let ws;
+          let closed = false;
+          function connect() {{
+            ws = new WebSocket('ws://{_cli_host}:{_cli_bridge_port}');
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => {{
+              term.reset();
+              sendResize();
+            }};
+            ws.onclose = () => {{
+              if (!closed) setTimeout(connect, 2000);
+            }};
+            ws.onerror = () => ws.close();
+            ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+          }}
+          window.addEventListener('beforeunload', () => {{ closed = true; ws.close(); }});
+          connect();
 
           term.onData((data) => {{
             if (ws.readyState === WebSocket.OPEN) {{
@@ -1826,7 +2084,7 @@ with tab_cli:
     )
 
 # ── Tab: CV ───────────────────────────────────────────────────────────────────
-with tab_cv:
+if active_section == '📑 CV':
     st.subheader("Anton Gulyaev — CV")
     if CV_PDF.is_file():
         st.caption("Main CV · July 6, 2026 · rendered for reliable mobile viewing")
@@ -1853,7 +2111,7 @@ with tab_cv:
         st.error(f"Current CV not found: {CV_PDF}")
 
 # ── Tab: File Viewer ──────────────────────────────────────────────────────────
-with tab_files:
+if active_section == '📄 Files':
     st.subheader("File Viewer")
     all_files = (
         sorted(DOCS_DIR.glob("**/*.html")) +
@@ -1875,7 +2133,7 @@ with tab_files:
 # Split View tab disabled 2026-08-12 at Anton's request (interfered with CLI reading).
 
 # ── Tab: Manim ────────────────────────────────────────────────────────────────
-with tab_manim:
+if active_section == '🎬 Manim':
     st.subheader("🎬 Manim — Math Visualizations")
 
     col_left, col_right = st.columns([1, 2])
@@ -1914,7 +2172,7 @@ with tab_manim:
             st.info("Select a clip on the left to play it here.")
 
 # ── Tab: Database / Schema Overview ──────────────────────────────────────────
-with tab_database:
+if active_section == '◈ Database':
     st.subheader("Database / Schema Overview")
     st.caption(
         "Manually refreshed Supabase schema snapshot · 2026-08-12. "
@@ -2108,7 +2366,7 @@ digraph schema_knowledge {
 ''', use_container_width=True)
 
 # ── Tab: Ailin (Axon-Native Rebuild) ─────────────────────────────────────────
-with tab_ailin:
+if active_section == '🧬 Ailin':
     st.subheader("🧬 Ailin — Axon-Native Rebuild")
     st.caption(
         "Design doc + schema for the rebuilt Ailin (separate Supabase project, "
@@ -2265,3 +2523,7 @@ digraph ailin_schema {
             "and RLS enabled. `conversations` and `dreams` have `vector(1536)` embedding columns "
             "with HNSW indexes for semantic search (pgvector, same pattern as Axon's own `messages` table)."
         )
+
+
+# Must remain last so each completed Streamlit script run is available to the watchdog.
+TRAFFIC.finish_run(_TRAFFIC_RUN)

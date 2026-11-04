@@ -1,0 +1,312 @@
+{
+  "campaign": "Experiment 49 \u2014 unified 30-run Table 3 campaign",
+  "coverage": "144/150 completed canonical cells; no imputation. Matched epsilon analysis uses only completed paired seeds.",
+  "all_three_epsilon_matched_seed_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
+  ],
+  "all_three_epsilon_n": 27,
+  "all_three_epsilon_means_sd_percent": {
+    "\u03b5=.65": {
+      "mean": 16.8134,
+      "sample_sd": 16.0225
+    },
+    "\u03b5=.75": {
+      "mean": 16.2268,
+      "sample_sd": 15.4658
+    },
+    "\u03b5=.90": {
+      "mean": 18.0829,
+      "sample_sd": 14.5446
+    }
+  },
+  "pairwise_matched_summary": [
+    {
+      "Comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "paired valid seeds": 28,
+      "\u03b5=.65 rate, mean \u00b1 SD": "17.0% \u00b1 15.8%",
+      "\u03b5=.75 rate, mean \u00b1 SD": "16.1% \u00b1 15.2%",
+      "seeds with a decrease": 7,
+      "decreasing seed IDs": "4, 10, 16, 18, 21, 24, 29"
+    },
+    {
+      "Comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "paired valid seeds": 27,
+      "\u03b5=.75 rate, mean \u00b1 SD": "16.2% \u00b1 15.5%",
+      "\u03b5=.90 rate, mean \u00b1 SD": "18.1% \u00b1 14.5%",
+      "seeds with a decrease": 9,
+      "decreasing seed IDs": "3, 4, 9, 13, 14, 16, 27, 29, 30"
+    },
+    {
+      "Comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "paired valid seeds": 27,
+      "\u03b5=.65 rate, mean \u00b1 SD": "16.8% \u00b1 16.0%",
+      "\u03b5=.90 rate, mean \u00b1 SD": "18.1% \u00b1 14.5%",
+      "seeds with a decrease": 10,
+      "decreasing seed IDs": "3, 4, 9, 10, 13, 14, 16, 18, 27, 29"
+    }
+  ],
+  "decrease_rows": [
+    {
+      "Seed": 4,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "12/21 (57.1%)",
+      "\u03b5=.75": "11/21 (52.4%)",
+      "change (percentage points)": -4.8
+    },
+    {
+      "Seed": 10,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "2/12 (16.7%)",
+      "\u03b5=.75": "1/12 (8.3%)",
+      "change (percentage points)": -8.3
+    },
+    {
+      "Seed": 16,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "4/13 (30.8%)",
+      "\u03b5=.75": "3/13 (23.1%)",
+      "change (percentage points)": -7.7
+    },
+    {
+      "Seed": 18,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "3/11 (27.3%)",
+      "\u03b5=.75": "1/11 (9.1%)",
+      "change (percentage points)": -18.2
+    },
+    {
+      "Seed": 21,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "5/16 (31.2%)",
+      "\u03b5=.75": "4/17 (23.5%)",
+      "change (percentage points)": -7.7
+    },
+    {
+      "Seed": 24,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "3/13 (23.1%)",
+      "\u03b5=.75": "2/15 (13.3%)",
+      "change (percentage points)": -9.7
+    },
+    {
+      "Seed": 29,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.75",
+      "\u03b5=.65": "9/27 (33.3%)",
+      "\u03b5=.75": "5/28 (17.9%)",
+      "change (percentage points)": -15.5
+    },
+    {
+      "Seed": 3,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "4/19 (21.1%)",
+      "\u03b5=.90": "3/21 (14.3%)",
+      "change (percentage points)": -6.8
+    },
+    {
+      "Seed": 4,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "11/21 (52.4%)",
+      "\u03b5=.90": "8/19 (42.1%)",
+      "change (percentage points)": -10.3
+    },
+    {
+      "Seed": 9,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "7/16 (43.8%)",
+      "\u03b5=.90": "4/19 (21.1%)",
+      "change (percentage points)": -22.7
+    },
+    {
+      "Seed": 13,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "11/26 (42.3%)",
+      "\u03b5=.90": "9/26 (34.6%)",
+      "change (percentage points)": -7.7
+    },
+    {
+      "Seed": 14,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "2/7 (28.6%)",
+      "\u03b5=.90": "1/7 (14.3%)",
+      "change (percentage points)": -14.3
+    },
+    {
+      "Seed": 16,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "3/13 (23.1%)",
+      "\u03b5=.90": "2/15 (13.3%)",
+      "change (percentage points)": -9.7
+    },
+    {
+      "Seed": 27,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "4/11 (36.4%)",
+      "\u03b5=.90": "1/11 (9.1%)",
+      "change (percentage points)": -27.3
+    },
+    {
+      "Seed": 29,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "5/28 (17.9%)",
+      "\u03b5=.90": "1/27 (3.7%)",
+      "change (percentage points)": -14.2
+    },
+    {
+      "Seed": 30,
+      "comparison": "\u03b5=.75 \u2192 \u03b5=.90",
+      "\u03b5=.75": "6/21 (28.6%)",
+      "\u03b5=.90": "5/20 (25.0%)",
+      "change (percentage points)": -3.6
+    },
+    {
+      "Seed": 3,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "3/19 (15.8%)",
+      "\u03b5=.90": "3/21 (14.3%)",
+      "change (percentage points)": -1.5
+    },
+    {
+      "Seed": 4,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "12/21 (57.1%)",
+      "\u03b5=.90": "8/19 (42.1%)",
+      "change (percentage points)": -15.0
+    },
+    {
+      "Seed": 9,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "6/17 (35.3%)",
+      "\u03b5=.90": "4/19 (21.1%)",
+      "change (percentage points)": -14.2
+    },
+    {
+      "Seed": 10,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "2/12 (16.7%)",
+      "\u03b5=.90": "1/12 (8.3%)",
+      "change (percentage points)": -8.3
+    },
+    {
+      "Seed": 13,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "10/26 (38.5%)",
+      "\u03b5=.90": "9/26 (34.6%)",
+      "change (percentage points)": -3.8
+    },
+    {
+      "Seed": 14,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "2/7 (28.6%)",
+      "\u03b5=.90": "1/7 (14.3%)",
+      "change (percentage points)": -14.3
+    },
+    {
+      "Seed": 16,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "4/13 (30.8%)",
+      "\u03b5=.90": "2/15 (13.3%)",
+      "change (percentage points)": -17.4
+    },
+    {
+      "Seed": 18,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "3/11 (27.3%)",
+      "\u03b5=.90": "1/10 (10.0%)",
+      "change (percentage points)": -17.3
+    },
+    {
+      "Seed": 27,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "4/11 (36.4%)",
+      "\u03b5=.90": "1/11 (9.1%)",
+      "change (percentage points)": -27.3
+    },
+    {
+      "Seed": 29,
+      "comparison": "\u03b5=.65 \u2192 \u03b5=.90",
+      "\u03b5=.65": "9/27 (33.3%)",
+      "\u03b5=.90": "1/27 (3.7%)",
+      "change (percentage points)": -29.6
+    }
+  ],
+  "interpretation": "The \u03b5=.65\u2192\u03b5=.75 aggregate decrease remains after matching seed sets, so it is not caused by unequal valid cells. It occurs within individual paired seeds. The \u03b5=.75\u2192\u03b5=.90 aggregate increase also remains on its 27-seed matched set, while some individual seeds decrease.",
+  "inconsistent_example": {
+    "epsilon": ".65",
+    "seed": 21,
+    "physical_session": 4,
+    "communication_iteration": 1,
+    "consistent": false,
+    "final_session_decisions": {
+      "Robot_A": 0,
+      "Robot_B": 3
+    },
+    "iteration_local_maximizers": {
+      "Robot_A": 0,
+      "Robot_B": 3
+    },
+    "component_composed_joint_action": 1,
+    "files": {
+      "Robot_A": "/home/anton/Axon/dashboard/assets/experiment49/e49_e065_seed21_session4_iter1_Robot_A.png",
+      "Robot_B": "/home/anton/Axon/dashboard/assets/experiment49/e49_e065_seed21_session4_iter1_Robot_B.png"
+    },
+    "source_file": "/lab/shared/anton/experiment49_unified_30run_beta095_20261011/results/experiment49_seed21_e065_samples10.json",
+    "objective": "recorded step_1 objective_values['path_length+entropy']; planning-time candidate score, not terminal realized entropy/objective"
+  },
+  "consistent_example": {
+    "epsilon": ".65",
+    "seed": 1,
+    "physical_session": 0,
+    "communication_iteration": 1,
+    "consistent": true,
+    "final_session_decisions": {
+      "Robot_A": 1,
+      "Robot_B": 1
+    },
+    "iteration_local_maximizers": {
+      "Robot_A": 1,
+      "Robot_B": 1
+    },
+    "belief_sharing_state": {
+      "Robot_A": [
+        4683743612465315840,
+        4683743612465315842
+      ],
+      "Robot_B": [
+        4755801206503243776,
+        4755801206503243778
+      ]
+    },
+    "files": {
+      "Robot_A": "/home/anton/Axon/dashboard/assets/experiment49/e49_e065_seed1_session0_iter1_Robot_A.png",
+      "Robot_B": "/home/anton/Axon/dashboard/assets/experiment49/e49_e065_seed1_session0_iter1_Robot_B.png"
+    },
+    "source_file": "/lab/shared/anton/experiment49_unified_30run_beta095_20261011/results/experiment49_seed1_e065_samples10.json",
+    "objective": "recorded step_1 objective_values['path_length+entropy']; planning-time candidate score, not terminal realized entropy/objective"
+  }
+}

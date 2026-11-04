@@ -4,10 +4,10 @@ from __future__ import annotations
 SessionManagerCodexNode — Codex-backed engine for Axon's relay v2 protocol.
 
 Like session_manager.py, this owns one long-lived interactive CLI process in a
-PTY. Telegram prompts and cli_node.py keystrokes therefore enter the same
-Codex TUI. With actors enabled, display.sock carries only validated replies;
-otherwise it mirrors raw TUI output. Completed Telegram responses are read
-from Codex's rollout JSONL, never scraped from the screen.
+PTY. The normal CLI and Telegram use the correlated response/progress stream;
+explicit mirror mode forwards keystrokes and display.sock bytes to the native
+Codex TUI. Model-routed exec turns have no native TUI to mirror. Completed
+responses come from structured Codex events, never from screen scraping.
 
 Confirmed live event shapes (codex 0.149.1, 2026-09-05 -- these differ from
 the on-disk ~/.codex/sessions/*.jsonl rollout-file format, which is a
@@ -22,7 +22,7 @@ Sockets (same protocol as session_manager.py -- consumers don't know or care
 which engine produced a response):
   user_input.sock      — NDJSON in:  {text, source, user_id, media_path?, request_id?}
   cli_input.sock       — raw keyboard bytes in: forwarded to the Codex PTY
-  display.sock         — validated replies with actors; raw PTY otherwise
+  display.sock         — native PTY output only (no synthesized transcript)
   claude_response.sock — NDJSON out: {text, source, user_id, request_id?}
   permission.sock      — listens but unused (codex runs with
                          --dangerously-bypass-approvals-and-sandbox, matching
@@ -51,6 +51,7 @@ import fcntl
 import termios
 import struct
 import glob
+from collections import deque
 from datetime import datetime, timezone
 
 
@@ -112,6 +113,7 @@ class QueueItem:
     actor_failure: Optional[str] = None
     actor_deferred: Optional[list[str]] = None
     actor_display_levels: Optional[dict[str, str]] = None
+    deadline: Optional[float] = None
 
 
 class SessionManagerCodexNode:
@@ -147,6 +149,8 @@ class SessionManagerCodexNode:
 
         self.display_clients: list[socket.socket] = []
         self.display_lock = threading.Lock()
+        self._display_history = bytearray()
+        self._main_uses_exec = False
         self.response_subscribers: list[socket.socket] = []
         self.response_subs_lock = threading.Lock()
 
@@ -313,8 +317,23 @@ class SessionManagerCodexNode:
         matches = glob.glob(
             str(Path.home() / ".codex" / "sessions" / "**" / "*.jsonl"),
             recursive=True)
-        created = [p for p in matches if p not in self._rollouts_before_spawn]
-        return Path(max(created, key=os.path.getmtime)) if created else None
+        # Actor exec turns also create rollouts after the TUI starts. Never
+        # adopt those as the native conversation: that loses completed replies
+        # and can later resume an actor thread as the main session.
+        created = []
+        for candidate in matches:
+            if candidate in self._rollouts_before_spawn:
+                continue
+            try:
+                with open(candidate, encoding="utf-8") as handle:
+                    metadata = json.loads(handle.readline()).get("payload", {})
+                if (metadata.get("source") == "cli"
+                        and metadata.get("cwd") == str(config.PROJECT_DIR)):
+                    created.append(candidate)
+            except (OSError, ValueError, TypeError):
+                continue
+        # Ambiguity must not attach an unrelated concurrently started TUI.
+        return Path(created[0]) if len(created) == 1 else None
 
     def _capture_thread_id(self) -> None:
         path = self._rollout_path()
@@ -379,9 +398,9 @@ class SessionManagerCodexNode:
                 break
             if not chunk:
                 break
-            # A local CLI is a mirror of the native Codex TUI.  Actor mode
-            # constrains relay messages, but must not hide the user-visible
-            # status, tool calls, output, or editor UI from that mirror.
+            # Mirror exactly what the manager-owned terminal renders. Exec
+            # turns have no TUI; they must neither suppress this PTY nor
+            # replace its display with a synthesized reply/actor summary.
             self._forward_display(chunk)
         if self._running:
             log.error("Codex TUI exited unexpectedly")
@@ -392,12 +411,14 @@ class SessionManagerCodexNode:
                 os.write(self.master_fd, data)
 
     def _wait_for_rollout_response(self, path: Path, offset: int) -> tuple[str, Optional[str]]:
-        deadline = time.time() + _RESPONSE_TIMEOUT
+        deadline = time.monotonic() + self._turn_timeout()
         next_heartbeat = 0.0
         response_text = ""
         remainder = ""
-        while time.time() < deadline and self._running:
-            now = time.time()
+        while time.monotonic() < deadline and self._running:
+            if self.codex_proc is not None and self.codex_proc.poll() is not None:
+                return response_text, "Codex terminal exited before completing the turn"
+            now = time.monotonic()
             if now >= next_heartbeat:
                 self._publish_activity()
                 next_heartbeat = now + _ACTIVITY_HEARTBEAT_SECONDS
@@ -423,21 +444,50 @@ class SessionManagerCodexNode:
                 if event.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "assistant":
                     texts = [part.get("text", "") for part in payload.get("content", [])
                              if isinstance(part, dict) and part.get("type") in {"output_text", "text"}]
-                    if texts:
+                    if texts and payload.get("channel") in {None, "final", "commentary"}:
                         response_text = "".join(texts)
+                        if payload.get("channel") == "commentary":
+                            self._publish_activity(growing=True, kind="progress",
+                                                   detail="Progress update",
+                                                   message=self._public_progress(response_text))
+                elif event.get("type") == "response_item" and payload.get("type") in {
+                    "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output",
+                }:
+                    # Never forward tool arguments/results or private reasoning.
+                    self._publish_activity(growing=True, kind="progress", detail="Tool activity")
                 if event.get("type") == "event_msg" and payload.get("type") == "task_complete":
                     return payload.get("last_agent_message") or response_text, None
                 if event.get("type") == "event_msg" and payload.get("type") in {"turn_aborted", "task_failed"}:
                     return response_text, payload.get("message") or payload.get("type")
+        # Do not feed a later request into a TUI which may still own this turn.
+        self._write_to_pty(b"\x03")
+        self._native_turn_unavailable = True
         return response_text, "Codex turn exceeded timeout"
+
+    def _turn_timeout(self) -> float:
+        item = getattr(self, "current_item", None)
+        deadline = getattr(item, "deadline", None)
+        if deadline is None:
+            return float(_RESPONSE_TIMEOUT)
+        return max(0.0, min(float(_RESPONSE_TIMEOUT), deadline - time.monotonic()))
 
     def _run_codex_turn(
         self, message_text: str, lane: str = "main", model: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         model = model or config.CODEX_MAIN_DEFAULT_MODEL
+        self._activity_phase = lane
+        self._publish_activity(growing=True, kind="phase", detail=(
+            "Checking project actors" if lane == "actor" else "Working on your request"
+        ))
+        if self._turn_timeout() <= 0:
+            return "", "Request exceeded its end-to-end deadline before this phase started"
+        if lane == "main":
+            self._main_uses_exec = (self._remote_mode or model != config.CODEX_MAIN_DEFAULT_MODEL
+                                    or getattr(self, "_native_turn_unavailable", False))
         # The default main lane remains attached to the shared interactive TUI.
         # Other lanes use persistent Codex thread IDs through `codex exec resume`.
-        if self._remote_mode or lane != "main" or model != config.CODEX_MAIN_DEFAULT_MODEL:
+        if (self._remote_mode or lane != "main" or model != config.CODEX_MAIN_DEFAULT_MODEL
+                or getattr(self, "_native_turn_unavailable", False)):
             return self._run_exec_codex_turn(message_text, lane, model)
 
         path = self._rollout_path()
@@ -491,9 +541,13 @@ class SessionManagerCodexNode:
     ) -> tuple[str, Optional[str]]:
         cmd = self._exec_codex_command(lane, model)
         location = "remote" if self._remote_mode else "routed"
-        self._forward_display(f"\r\n[{location} Codex turn: {lane}/{model}]\r\n".encode())
         proc: Optional[subprocess.Popen] = None
-        result: dict[str, object] = {}
+        events: queue.Queue = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=30)
+        response_text = ""
+        pending_message = ""
+        error_message: Optional[str] = None
+        readers = []
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -506,37 +560,101 @@ class SessionManagerCodexNode:
             with self.pty_lock:
                 self._active_exec_proc = proc
 
-            # communicate() must drain stdout/stderr concurrently or a verbose
-            # JSON event stream can fill an OS pipe and deadlock. Run it in a
-            # helper thread so this thread can publish liveness heartbeats while
-            # Codex is legitimately busy. This does not retry the turn.
-            def communicate() -> None:
+            # Drain both pipes concurrently, but consume JSON as it arrives:
+            # communicate() hid every progress event until the process exited.
+            def read_stdout() -> None:
                 try:
-                    result["streams"] = proc.communicate(input=message_text)
-                except Exception as exc:  # surfaced below in the owner thread
-                    result["error"] = exc
+                    for line in proc.stdout:
+                        events.put(line)
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    proc.stdout.close()
+                    events.put(None)
 
-            worker = threading.Thread(target=communicate, daemon=True)
-            worker.start()
-            deadline = time.monotonic() + _RESPONSE_TIMEOUT
-            self._publish_activity()
-            while worker.is_alive() and time.monotonic() < deadline:
-                worker.join(timeout=_ACTIVITY_HEARTBEAT_SECONDS)
-                if worker.is_alive():
+            def read_stderr() -> None:
+                try:
+                    for line in proc.stderr:
+                        stderr_tail.append(line[-2000:])
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    proc.stderr.close()
+
+            def write_prompt() -> None:
+                try:
+                    proc.stdin.write(message_text)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError, ValueError):
+                    pass
+                finally:
+                    proc.stdin.close()
+
+            readers = [threading.Thread(target=target, daemon=True)
+                       for target in (read_stdout, read_stderr, write_prompt)]
+            for reader in readers:
+                reader.start()
+            deadline = time.monotonic() + self._turn_timeout()
+            next_heartbeat = 0.0
+            stdout_done = False
+            while not (stdout_done and proc.poll() is not None):
+                now = time.monotonic()
+                if now >= deadline:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    return "", f"{location.capitalize()} Codex turn exceeded timeout"
+                if now >= next_heartbeat:
                     self._publish_activity()
-            if worker.is_alive():
-                proc.terminate()
-                worker.join(timeout=5)
-                if worker.is_alive():
-                    proc.kill()
-                    worker.join(timeout=5)
-                return "", f"{location.capitalize()} Codex turn exceeded timeout"
-            if "error" in result:
-                error = result["error"]
-                if isinstance(error, BaseException):
-                    raise error
-                raise RuntimeError(str(error))
-            stdout, stderr = result.get("streams", ("", ""))
+                    next_heartbeat = now + _ACTIVITY_HEARTBEAT_SECONDS
+                try:
+                    line = events.get(timeout=min(0.25, max(0.001, deadline - now)))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    stdout_done = True
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "thread.started":
+                    if event.get("thread_id"):
+                        self._remember_thread(lane, model, event["thread_id"])
+                elif event_type == "turn.failed":
+                    error_message = (event.get("error") or {}).get("message") or "Codex turn failed"
+                elif event_type in {"item.started", "item.completed"}:
+                    item = event.get("item") or {}
+                    item_type = item.get("type")
+                    if item_type == "agent_message" and event_type == "item.completed":
+                        # Exec has no channel field. A message followed by another
+                        # action is commentary; the final message is delivered once
+                        # through the normal, cleaned response path.
+                        if pending_message and lane == "main":
+                            self._publish_activity(growing=True, kind="progress", detail="Progress update",
+                                                   message=self._public_progress(pending_message))
+                        response_text = pending_message = item.get("text", "")
+                    elif item_type in {"command_execution", "mcp_tool_call", "web_search", "file_change", "todo_list"}:
+                        if pending_message and lane == "main":
+                            self._publish_activity(growing=True, kind="progress", detail="Progress update",
+                                                   message=self._public_progress(pending_message))
+                            pending_message = ""
+                        labels = {"command_execution": "Running a command", "mcp_tool_call": "Using a tool",
+                                  "web_search": "Searching", "file_change": "Editing files", "todo_list": "Updating the plan"}
+                        detail = labels[item_type]
+                        if event_type == "item.completed":
+                            detail += " — completed"
+                        self._publish_activity(growing=True, kind="progress", detail=detail)
+                elif event_type in {"turn.started", "turn.completed"}:
+                    self._publish_activity(growing=True, kind="progress", detail=(
+                        "Model turn started" if event_type == "turn.started" else "Model turn completed"
+                    ))
+            for reader in readers:
+                reader.join(timeout=1)
         except subprocess.TimeoutExpired:
             # Kept for compatibility with mocked Popen implementations.
             if proc is not None:
@@ -551,31 +669,22 @@ class SessionManagerCodexNode:
         except Exception as exc:
             return "", f"{location.capitalize()} Codex launch failed: {exc}"
         finally:
+            # Even parser/publication failures must not leave an orphan turn
+            # running after this request has received a terminal error.
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            for reader in readers:
+                reader.join(timeout=1)
             with self.pty_lock:
                 self._active_exec_proc = None
 
-        response_text = ""
-        error_message: Optional[str] = None
-        for line in stdout.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            event_type = event.get("type")
-            if event_type == "thread.started":
-                thread_id = event.get("thread_id")
-                if thread_id:
-                    self._remember_thread(lane, model, thread_id)
-            elif event_type == "item.completed":
-                item = event.get("item") or {}
-                if item.get("type") == "agent_message":
-                    response_text = item.get("text", "")
-            elif event_type == "turn.failed":
-                error = event.get("error") or {}
-                error_message = error.get("message") or "Remote Codex turn failed"
-
         if proc.returncode != 0 and not error_message:
-            detail = stderr.strip().splitlines()
+            detail = "".join(stderr_tail).strip().splitlines()
             error_message = detail[-1] if detail else f"Remote Codex exited {proc.returncode}"
         return response_text, error_message
 
@@ -590,6 +699,9 @@ class SessionManagerCodexNode:
 
     def _forward_display(self, data: bytes):
         with self.display_lock:
+            self._display_history.extend(data)
+            # Recent output replay, not a complete terminal screen snapshot.
+            del self._display_history[:-262144]
             dead = []
             for conn in self.display_clients:
                 try:
@@ -599,15 +711,37 @@ class SessionManagerCodexNode:
             for conn in dead:
                 self.display_clients.remove(conn)
 
-    def _publish_activity(self) -> None:
-        """Publish correlated liveness for the currently executing request."""
+    def _attach_display(self, conn):
+        # Replay and subscription share a lock with publication: no gaps or
+        # interleaving between historical output and the next live chunk.
+        with self.display_lock:
+            try:
+                conn.sendall(bytes(self._display_history))
+            except OSError:
+                conn.close()
+                return
+            self.display_clients.append(conn)
+
+    @staticmethod
+    def _public_progress(text: str) -> str:
+        """Only public prose: hide all internal routing/memory/actor protocols."""
+        if any(marker in text for marker in ("<<<", "[ACTOR", "[MEMORY:", "[REMEMBER:", "[GOAL:", "[DONE:")):
+            return ""
+        return text[:4000].strip()
+
+    def _publish_activity(self, *, growing=False, kind="heartbeat", detail="", message="") -> None:
+        """A heartbeat proves transport liveness, never scientific/task progress."""
         with self.state_lock:
             item = self.current_item
         if item is None:
             return
         payload = json.dumps({
             "type": "activity",
-            "growing": True,
+            "growing": growing,
+            "kind": kind,
+            "phase": getattr(self, "_activity_phase", "preparing"),
+            "detail": detail,
+            "message": message,
             "source": item.source,
             "user_id": item.user_id,
             "request_id": item.request_id,
@@ -636,6 +770,10 @@ class SessionManagerCodexNode:
             with self.state_lock:
                 self.state = "GENERATING"
                 self.current_item = item
+            if item.deadline is None:
+                item.deadline = time.monotonic() + config.CODEX_REQUEST_TIMEOUT_SECONDS
+            self._activity_phase = "preparing"
+            self._publish_activity(growing=True, kind="phase", detail="Preparing your request")
 
             log.info(f"Processing message from {item.source}: {item.text[:50]!r}")
 
@@ -738,7 +876,9 @@ class SessionManagerCodexNode:
 
             if error_message:
                 log.error(f"Codex turn failed: {error_message}")
-                response_text = response_text or f"[codex engine error: {error_message}]"
+                # A last commentary message is not a completed answer. Never
+                # hide a terminal error behind that partial progress text.
+                response_text = f"[codex engine error: {error_message}]"
 
             self._publish_response(item, response_text)
 
@@ -863,11 +1003,8 @@ class SessionManagerCodexNode:
     def _publish_clean_response(self, item: QueueItem, response_text: str):
         response_text = self._transform_instance_response(item, response_text)
         clean_text = supabase_client.process_response(response_text, channel=config.SESSION_CHANNEL)
-        # A local display client already receives the native TUI stream.  Do
-        # not append the parsed final answer there as well, or it appears
-        # twice.  Remote execution has no local TUI, so it needs this text.
-        if self._remote_mode and clean_text:
-            self._forward_display(("\r\n" + clean_text + "\r\n").encode())
+        # Relay replies (including actor summaries) belong exclusively on
+        # the response socket. Never inject them into the native PTY stream.
         supabase_client.save_message(
             role="assistant", content=clean_text, channel=config.SESSION_CHANNEL,
         )
@@ -940,6 +1077,7 @@ class SessionManagerCodexNode:
                         user_id=msg.get("user_id", "unknown"),
                         media_path=msg.get("media_path"),
                         request_id=msg.get("request_id"),
+                        deadline=time.monotonic() + config.CODEX_REQUEST_TIMEOUT_SECONDS,
                     )
                     self.input_queue.put(item)
 
@@ -1014,8 +1152,7 @@ class SessionManagerCodexNode:
             try:
                 conn, _ = server.accept()
                 log.info("Display client connected (%d total)", len(self.display_clients) + 1)
-                with self.display_lock:
-                    self.display_clients.append(conn)
+                self._attach_display(conn)
             except Exception:
                 break
 

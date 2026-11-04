@@ -7,3 +7,4 @@ mcp==1.27.0
 zhipuai==2.1.5.20250825
 PyMuPDF==1.27.2.3
 anthropic>=0.40.0
+slack-bolt>=1.18,<2

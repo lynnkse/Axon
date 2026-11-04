@@ -174,7 +174,7 @@ def test_anton_state_actor_relevance_probes_behavior_food_and_fitness_timestamps
     ]
 
 
-def test_codex_usage_actor_is_only_prompted_if_hourly_daemon_is_stale():
+def test_codex_usage_actor_is_only_prompted_if_two_hour_daemon_is_stale():
     recent = {
         **row("codex-usage-monitor"),
         "actor_type": "codex-usage-monitor",

@@ -132,16 +132,16 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.assertIn("Visible reply", published)
         self.assertIn("could not be saved", published)
 
-    def test_local_tui_does_not_stream_raw_actor_answer_during_turn(self):
+    def test_local_tui_streams_visible_activity_with_actors_enabled(self):
         self.node._running = True
         self.node.master_fd = 1
         self.node.state_lock = threading.Lock()
         self.node.current_item = self.item
         self.node._forward_display = Mock()
         with patch.object(config, "ACTORS_ENABLED", True), \
-             patch("session_manager_codex.os.read", side_effect=[b"raw actor JSON", b""]):
+             patch("session_manager_codex.os.read", side_effect=[b"native tool activity", b""]):
             self.node._pty_reader_thread()
-        self.node._forward_display.assert_not_called()
+        self.node._forward_display.assert_called_once_with(b"native tool activity")
 
     def test_activity_heartbeat_is_correlated_to_current_request(self):
         subscriber = Mock()
@@ -158,15 +158,15 @@ class SessionManagerCodexActorDeliveryTests(unittest.TestCase):
         self.assertEqual(payload["user_id"], "anton")
         self.assertEqual(payload["request_id"], self.item.request_id)
 
-    def test_local_tui_does_not_redraw_raw_actor_answer_after_turn(self):
+    def test_local_tui_streams_visible_prompt_after_turn(self):
         self.node._running = True
         self.node.master_fd = 1
         self.node.current_item = None
         self.node._forward_display = Mock()
         with patch.object(config, "ACTORS_ENABLED", True), \
-             patch("session_manager_codex.os.read", side_effect=[b"raw actor JSON", b""]):
+             patch("session_manager_codex.os.read", side_effect=[b"native prompt", b""]):
             self.node._pty_reader_thread()
-        self.node._forward_display.assert_not_called()
+        self.node._forward_display.assert_called_once_with(b"native prompt")
 
     def test_all_actors_get_readable_lines(self):
         from actor_model.prompt_blocks import ActorUpdate

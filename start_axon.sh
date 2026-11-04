@@ -183,7 +183,7 @@ ensure_session "$CLI_SESSION" "$AXON_DIR/cli_node.py" \
 ensure_session curator "$AXON_DIR/curator.py" \
     "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/curator.py' 2>&1 | tee '$LOG_DIR/curator.log'"
 
-# ── 5. usage — deterministic hourly Codex quota monitor ─────────────────────
+# ── 5. usage — deterministic two-hour Codex quota monitor ──────────────────
 ensure_session usage "$AXON_DIR/codex_usage_monitor.py" \
     "cd '$AXON_DIR' && $PYTHON -u '$AXON_DIR/codex_usage_monitor.py' 2>&1 | tee '$LOG_DIR/codex_usage_monitor.log'"
 

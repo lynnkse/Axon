@@ -28,6 +28,10 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import config
+from fitness_transport import (
+    FitnessTransportError, PROTECTED_TABLES as _FITNESS_TABLES,
+    via_writer as _fitness_via_writer,
+)
 
 log = logging.getLogger(__name__)
 _audit_lock = threading.Lock()
@@ -83,6 +87,9 @@ def strip_response_tags(text: str) -> str:
 
 def _rest_insert(table: str, payload: dict) -> bool:
     """Insert one row into a Supabase table via REST API. Returns True on success."""
+    routed = _fitness_via_writer("POST", table, payload)
+    if routed is not None:
+        return bool(routed["rows"])
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return False
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
@@ -112,6 +119,9 @@ def _rest_insert(table: str, payload: dict) -> bool:
 
 def _rest_patch(table: str, filters: str, payload: dict) -> bool:
     """PATCH (update) rows matching filters. Never deletes anything."""
+    routed = _fitness_via_writer("PATCH", f"{table}?{filters}", payload)
+    if routed is not None:
+        return bool(routed["rows"])
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
         return False
     url = f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{table}?{filters}"
@@ -131,7 +141,12 @@ def _rest_patch(table: str, filters: str, payload: dict) -> bool:
 
 
 def _rest_get(path: str, timeout: int = 10):
+    routed = _fitness_via_writer("GET", path, timeout=timeout)
+    if routed is not None:
+        return routed["rows"]
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
+        if path.split("?", 1)[0] in _FITNESS_TABLES:
+            raise FitnessTransportError("Authoritative fitness connection is not configured; history is unknown")
         return []
     req = urllib.request.Request(f"{config.SUPABASE_URL.rstrip('/')}/rest/v1/{path}", headers={
         "apikey": config.SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {config.SUPABASE_SERVICE_ROLE_KEY}"})
@@ -139,6 +154,8 @@ def _rest_get(path: str, timeout: int = 10):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
+        if path.split("?", 1)[0] in _FITNESS_TABLES:
+            raise FitnessTransportError("Authoritative fitness read failed; history is unknown") from e
         log.warning(f"Supabase GET {path} failed: {e}")
         return []
 
@@ -217,7 +234,7 @@ def _prompt_relevance_exists(path: str) -> bool | None:
 
 AILIN_PULSE_COOLDOWN_SECONDS = 5 * 60  # min gap between internal ticks sent to Ailin's own session
 CONDOR_CHECK_COOLDOWN_SECONDS = 15 * 60
-CODEX_USAGE_CHECK_COOLDOWN_SECONDS = 60 * 60
+CODEX_USAGE_CHECK_COOLDOWN_SECONDS = 2 * 60 * 60
 
 
 def latest_codex_weekly_usage() -> tuple[float, int] | None:
